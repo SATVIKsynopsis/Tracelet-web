@@ -1,0 +1,101 @@
+---
+title: CI integration
+description: Run Tracelet on every config change, with a cached Collector download.
+icon: GitPullRequest
+---
+
+`otel-test` is built for CI. It runs non-interactively, prints plain text when stdout isn't a terminal, and
+exits non-zero on any failure. The main cost is the first Collector download (about 100 MB), so cache it.
+
+## GitHub Actions
+
+```yaml title=".github/workflows/collector-tests.yml"
+name: Collector tests
+
+on:
+  pull_request:
+    paths: ["otel/**"]
+  push:
+    branches: [main]
+
+jobs:
+  otel-test:
+    runs-on: ubuntu-latest
+    env:
+      OTEL_TEST_CACHE_DIR: ${{ github.workspace }}/.otel-test-cache
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache the Collector
+        uses: actions/cache@v4
+        with:
+          path: .otel-test-cache
+          key: otelcol-contrib-0.164.0-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install otel-test
+        run: |
+          curl -fsSL https://github.com/SATVIKsynopsis/Tracelet/releases/latest/download/install.sh \
+            | OTEL_TEST_VERSION=v0.1.0 sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Validate
+        run: otel-test validate -f otel/otel-test.yaml
+
+      - name: Test
+        run: otel-test test -f otel/otel-test.yaml --color always
+```
+
+Notes:
+
+- **Pin the version** with `OTEL_TEST_VERSION`, so a new release can't change results without a commit.
+- **Set `OTEL_TEST_CACHE_DIR`** to a path inside the workspace, so the cache path doesn't depend on the runner's
+  `XDG_CACHE_HOME`. Put the Collector version in the cache key.
+- **`validate` first** gives a fast, readable failure for spec and config mistakes before any Collector starts.
+- **`--color always`** keeps colors in the Actions log. Leave it out, or set `NO_COLOR=1`, for plain logs.
+
+## Any CI system
+
+The steps are the same everywhere:
+
+```bash
+curl -fsSL https://github.com/SATVIKsynopsis/Tracelet/releases/latest/download/install.sh | OTEL_TEST_VERSION=v0.1.0 sh
+export PATH="$HOME/.local/bin:$PATH"
+export OTEL_TEST_CACHE_DIR="$PWD/.otel-test-cache"   # cache this directory between runs
+otel-test validate
+otel-test test
+```
+
+## Air-gapped runners
+
+Pre-populate the cache, or provide the binary yourself, and forbid downloads:
+
+```bash
+export OTEL_TEST_COLLECTOR_BIN=/opt/otelcol-contrib/otelcol-contrib
+otel-test test --offline
+```
+
+Or point the download at an internal mirror. The compiled-in checksums still apply:
+
+```bash
+export OTEL_TEST_DOWNLOAD_BASE_URL=https://mirror.internal/opentelemetry-collector-releases
+```
+
+The mirror must serve the same paths as the upstream releases, such as
+`v0.164.0/otelcol-contrib_0.164.0_linux_amd64.tar.gz`.
+
+## Runtime budget
+
+Tests run sequentially. Each one costs Collector startup (about 150–900 ms), its observation window, and a
+graceful shutdown. Tests with `dropped`, `count` or `absent` always use their full timeout. To keep suites fast:
+
+- use the shortest timeout that is safely longer than your `batch` timeout or `decision_wait`;
+- set `timeout` per test rather than raising `defaults.timeout` for everyone;
+- avoid cloud `resource_detection` detectors in tested pipelines, since their timeout is added to every test.
+
+For scale: the five [examples](/docs/examples), with 25 tests and 17 regression patches, take about seven minutes
+to run end to end with `verify.sh`.
+
+## Windows runners
+
+Release builds exist for Windows, but the Collector is killed rather than shut down there, so buffered
+telemetry is not flushed. Prefer Linux runners for suites that use `batch`, `tail_sampling` or `dropped`.

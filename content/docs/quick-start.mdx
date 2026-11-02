@@ -1,0 +1,195 @@
+---
+title: Quick start
+description: Generate the starter project with otel-test init and run its three tests.
+icon: Rocket
+---
+
+<Steps>
+<Step>
+
+### Create a project
+
+```bash
+mkdir my-collector-tests && cd my-collector-tests
+otel-test init
+```
+
+```text
+otel-test v0.1.0
+
+  created ./otel-test.yaml
+  created ./collector.yaml
+  created ./fixtures/login-span.json
+  created ./fixtures/login-log.json
+  created ./fixtures/healthz-span.json
+
+Next: run `otel-test test`
+```
+
+</Step>
+<Step>
+
+### Run the tests
+
+```bash
+otel-test test
+```
+
+```text
+otel-test v0.1.0
+
+Collector: v0.164.0
+Config:    collector.yaml
+Tests:     3
+
+✓ passwords are removed from spans
+✓ passwords are removed from logs
+✓ health checks are dropped
+
+3 passed, 0 failed
+
+Time: 8.50s
+```
+
+The first run downloads the Collector first. Each test starts its own Collector and observes it for the
+test's timeout (2 s in this project), so expect a few seconds per test.
+
+</Step>
+<Step>
+
+### Break something
+
+Open `collector.yaml` and delete the rule that removes `password`:
+
+```yaml title="collector.yaml"
+processors:
+  attributes/redact:
+    actions:
+      - key: password # [!code --]
+        action: delete # [!code --]
+      - key: user.name
+        action: hash
+```
+
+Run the tests again:
+
+```text
+✗ passwords are removed from spans
+
+    ✗ attribute password is absent
+      Expected: password absent from every span
+      Actual:   1 of 1 spans failed
+                  span "POST /login" at otlp_http/backend: password = "hunter2" (item)
+
+✗ passwords are removed from logs
+
+    ✗ attribute password is absent
+      Expected: password absent from every log record
+      Actual:   1 of 1 log records failed
+                  log record "login attempt" at otlp_http/backend: password = "hunter2" (item)
+
+✓ health checks are dropped
+
+1 passed, 2 failed
+
+Time: 9.27s
+error: 2 test(s) failed
+```
+
+`otel-test` exits with code `1`, so a CI job fails.
+
+</Step>
+</Steps>
+
+## What `init` generated
+
+The starter config is a production-style Collector config. It deletes passwords, hashes user names and drops
+health checks:
+
+```yaml title="collector.yaml"
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  attributes/redact:
+    actions:
+      - key: password
+        action: delete
+      - key: user.name
+        action: hash
+
+  filter/healthz:
+    error_mode: ignore
+    traces:
+      span:
+        - attributes["http.route"] == "/healthz"
+
+  batch:
+    timeout: 200ms
+
+exporters:
+  otlp_http/backend:
+    endpoint: https://otlp.example.com
+    headers:
+      authorization: "Bearer ${env:BACKEND_TOKEN}"
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [filter/healthz, attributes/redact, batch]
+      exporters: [otlp_http/backend]
+    logs:
+      receivers: [otlp]
+      processors: [attributes/redact, batch]
+      exporters: [otlp_http/backend]
+```
+
+The tests:
+
+```yaml title="otel-test.yaml"
+collector: ./collector.yaml
+
+defaults:
+  timeout: 2s
+
+tests:
+  - name: passwords are removed from spans
+    input: fixtures/login-span.json
+    expect:
+      - attribute: password
+        absent: true
+      - attribute: http.route
+        equals: /login
+      - exporter: otlp_http/backend
+        count: 1
+
+  - name: passwords are removed from logs
+    input: fixtures/login-log.json
+    expect:
+      - attribute: password
+        absent: true
+      - attribute: user.name
+        matches: "[0-9a-f]{64}"
+
+  - name: health checks are dropped
+    input: fixtures/healthz-span.json
+    expect:
+      - dropped: true
+```
+
+`BACKEND_TOKEN` doesn't need to be set. Tracelet replaces the exporter, so its headers are never used.
+
+`init` refuses to overwrite existing files. Pass `--force` to overwrite them, or give a directory:
+`otel-test init my-tests`.
+
+## Next steps
+
+- [Write your first test](/docs/first-test) against your own config.
+- Run `otel-test validate` to see how your config is rewritten. See [`otel-test validate`](/docs/cli/validate).
+- Browse the [examples](/docs/examples).

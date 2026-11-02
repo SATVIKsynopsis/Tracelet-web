@@ -1,0 +1,165 @@
+---
+title: Write your first test
+description: Test a behavior of your own Collector config, from fixture to passing assertion.
+icon: FlaskConical
+---
+
+This page walks through testing one behavior of a config you already have: an error span must reach your
+alerting exporter. The same steps apply to any behavior.
+
+<Steps>
+<Step>
+
+### Point the test file at your config
+
+Create `otel-test.yaml` next to your Collector config. All paths in it are relative to the test file.
+
+```yaml title="otel-test.yaml"
+collector: ./collector.yaml
+
+tests: []
+```
+
+</Step>
+<Step>
+
+### Write a fixture
+
+A fixture is the OTLP/JSON body an OTLP/HTTP client would `POST` to `/v1/traces`. Write the smallest span
+that triggers the behavior. Here, a span with an error status (this is `fixtures/traces/error-span.json` from
+the repository):
+
+```json title="fixtures/error-span.json"
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          { "key": "service.name", "value": { "stringValue": "payment-api" } },
+          { "key": "deployment.environment.name", "value": { "stringValue": "test" } }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": { "name": "otel-test.fixtures", "version": "1.0.0" },
+          "spans": [
+            {
+              "traceId": "5b8efff798038103d269b633813fc60e",
+              "spanId": "eee19b7ec3c1b176",
+              "name": "POST /api/charge",
+              "kind": 2,
+              "startTimeUnixNano": "1735689600000000000",
+              "endTimeUnixNano": "1735689600120000000",
+              "attributes": [
+                { "key": "http.request.method", "value": { "stringValue": "POST" } },
+                { "key": "http.route", "value": { "stringValue": "/api/charge" } },
+                { "key": "http.response.status_code", "value": { "intValue": "500" } },
+                { "key": "error.type", "value": { "stringValue": "503" } }
+              ],
+              "status": { "code": 2, "message": "card processor unavailable" }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+Watch for the OTLP/JSON rules: IDs are hex, 64-bit integers are strings, enums are numbers
+(`"code": 2` is `STATUS_CODE_ERROR`). See [Span fixtures](/docs/fixtures/spans).
+
+</Step>
+<Step>
+
+### Add a test with assertions
+
+Use the exporter IDs from your config, exactly as written there.
+
+```yaml title="otel-test.yaml"
+collector: ./collector.yaml
+
+tests:
+  - name: errors reach alerting
+    input: fixtures/error-span.json
+    expect:
+      - exporter: otlp_grpc/alerts
+        count: 1
+      - attribute: http.response.status_code
+        exporter: otlp_grpc/alerts
+        equals: 500
+```
+
+`equals: 500` is an integer, matching the fixture's `intValue`. `"500"` in quotes would be a string and would
+fail. See [Attribute assertions](/docs/assertions/attributes).
+
+</Step>
+<Step>
+
+### Validate before running
+
+```bash
+otel-test validate
+```
+
+`validate` checks the test file, the config and every fixture, prints how the config is rewritten, runs
+`otelcol validate` on the result, and lists every planned test with its assertions. It doesn't run the tests.
+If a name doesn't match your config, you'll see something like:
+
+```text
+error: test specification otel-test.yaml does not match the Collector configuration:
+  - test "errors reach alerting".expect[0]: exporter "alerts" is not used by any pipeline (exporters: otlp_http/acme, otlp_grpc/alerts)
+```
+
+</Step>
+<Step>
+
+### Run it
+
+```bash
+otel-test test
+```
+
+If the assertion fails, the output says what arrived where:
+
+```text
+✗ errors reach alerting
+
+    ✗ exporter otlp_grpc/alerts receives 1 item(s)
+      Expected: 1 span
+      Actual:   0 spans
+      Exporter: otlp_grpc/alerts
+      Received: otlp_http/acme: 1 span
+```
+
+</Step>
+</Steps>
+
+## Make the test meaningful
+
+- **Add a negative case.** A routing test is stronger with `count: 0` on the exporters that must not receive
+  the span.
+- **Guard against over-redaction.** Assert that attributes you need still survive (`equals`, `present`), not only
+  that secrets are gone.
+- **Test that the test can fail.** Make the change you're guarding against, then run the suite and confirm it
+  fails. The [examples](/docs/examples) ship patches that do exactly this.
+
+## If your config has several receivers
+
+When more than one receiver feeds the fixture's signal, the test must say which one to inject through:
+
+```yaml
+defaults:
+  receiver: otlp
+
+tests:
+  - name: file logs get the same treatment
+    input: fixtures/json-body-log.json
+    receiver: filelog/app
+    expect:
+      - attribute: password
+        absent: true
+```
+
+The fixture is posted to the replacement for `filelog/app`, so it enters the same pipelines that receiver feeds.
+The `filelog` receiver itself does not run.

@@ -1,0 +1,216 @@
+---
+title: Sampling and filtering
+description: Drop probe traffic, then tail-sample errors, slow traces and enterprise customers.
+icon: Funnel
+---
+
+Cost control in front of a SaaS tracing backend. Kubernetes probe spans are dropped first, then
+`tail_sampling` keeps only errors, slow requests (over 1 s) and enterprise customers. Everything else is dropped.
+
+**Components:** `filter` (OTTL, including `IsMatch` on the user agent), `tail_sampling` (`status_code`,
+`latency` and `string_attribute` policies), `memory_limiter`, `batch`.
+
+Each fixture is a **whole trace**. The error trace has three spans and only one of them failed, so `count: 3`
+checks that tail sampling keeps the full trace and not just the failing span.
+
+Source: [`examples/real-world/03-sampling-filtering`](https://github.com/SATVIKsynopsis/Tracelet/tree/main/examples/real-world/03-sampling-filtering)
+
+## Run it
+
+```bash
+git clone https://github.com/SATVIKsynopsis/Tracelet.git
+cd Tracelet
+otel-test test -f examples/real-world/03-sampling-filtering/otel-test.yaml
+```
+
+The config references credentials and production endpoints exactly as a real config would. otel-test
+replaces the exporters, so the variables don't need to be set. All 6 tests pass against the
+unchanged config.
+
+## What is tested
+
+| Test | Protects against |
+| --- | --- |
+| error traces are kept in full | losing errors, or keeping only partial traces |
+| slow traces are kept | latency policy misconfigured |
+| enterprise traces are kept | attribute policy misconfigured |
+| fast healthy traces are not sampled | cost blow-up, for example from a catch-all policy |
+| failing readiness probes are dropped before sampling | probe errors during rollouts being sampled as errors. This tests processor order. |
+| probes are identified by user agent | probes on unexpected routes |
+
+```yaml title="otel-test.yaml"
+collector: ./collector.yaml
+
+# tail_sampling decides 500ms after a trace's first span; 2s leaves margin.
+defaults:
+  timeout: 2s
+
+tests:
+  - name: error traces are kept in full
+    input: fixtures/error-trace.json
+    expect:
+      # All three spans, not only the failing one.
+      - exporter: otlp_grpc/honeycomb
+        count: 3
+
+  - name: slow traces are kept
+    input: fixtures/slow-trace.json
+    expect:
+      - exporter: otlp_grpc/honeycomb
+        count: 2
+
+  - name: enterprise traces are kept
+    input: fixtures/enterprise-trace.json
+    expect:
+      - exporter: otlp_grpc/honeycomb
+        count: 1
+      - attribute: customer.tier
+        level: resource
+        equals: enterprise
+
+  - name: fast healthy traces are not sampled
+    input: fixtures/fast-ok-trace.json
+    expect:
+      - dropped: true
+
+  - name: failing readiness probes are dropped before sampling
+    input: fixtures/failing-probe-trace.json
+    expect:
+      - dropped: true
+
+  - name: probes are identified by user agent
+    input: fixtures/probe-other-route-trace.json
+    expect:
+      - dropped: true
+```
+
+**Timing.** `decision_wait` is 500 ms and the test timeout is 2 s. `tail_sampling` also decides pending
+traces at graceful shutdown, so a longer `decision_wait` would still work on Linux and macOS. The
+`groupbytrace` processor does **not** flush at shutdown, and otel-test warns when its wait isn't shorter than the
+timeout.
+
+The last two regressions show that `dropped: true` isn't vacuous: when the config changes, the same fixture is
+exported and the test fails.
+
+## The Collector config
+
+```yaml title="collector.yaml"
+# Cost control: drop probe traffic, then keep only traces worth paying for —
+# errors, slow requests and enterprise customers. Everything else is dropped.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 1024
+
+  # Kubernetes probes fail during rollouts; those errors must not be sampled.
+  filter/probes:
+    error_mode: ignore
+    traces:
+      span:
+        - attributes["http.route"] == "/healthz"
+        - attributes["http.route"] == "/readyz"
+        - IsMatch(attributes["user_agent.original"], "^kube-probe/.*")
+
+  tail_sampling:
+    decision_wait: 500ms
+    num_traces: 50000
+    expected_new_traces_per_sec: 1000
+    policies:
+      - name: errors
+        type: status_code
+        status_code:
+          status_codes: [ERROR]
+      - name: slow
+        type: latency
+        latency:
+          threshold_ms: 1000
+      - name: enterprise
+        type: string_attribute
+        string_attribute:
+          key: customer.tier
+          values: [enterprise]
+
+  batch:
+    timeout: 200ms
+
+exporters:
+  otlp_grpc/honeycomb:
+    endpoint: api.honeycomb.io:443
+    headers:
+      x-honeycomb-team: ${env:HONEYCOMB_API_KEY}
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/probes, tail_sampling, batch]
+      exporters: [otlp_grpc/honeycomb]
+```
+
+Fixtures: `enterprise-trace.json`, `error-trace.json`, `failing-probe-trace.json`, `fast-ok-trace.json`, `probe-other-route-trace.json`, `slow-trace.json`, in [`fixtures/`](https://github.com/SATVIKsynopsis/Tracelet/tree/main/examples/real-world/03-sampling-filtering/fixtures).
+
+## Regressions it catches
+
+Each `regressions/<name>.patch` is a realistic edit to `collector.yaml`. Each `.expect` file lists the
+assertions, as `test name :: assertion`, that must fail when the patch is applied.
+
+| Patch | Change | Fails |
+| --- | --- | --- |
+| `errors-policy-removed` | `status_code` policy deleted | error traces are kept in full: `exporter otlp_grpc/honeycomb receives 3 item(s)` |
+| `latency-threshold-raised` | 1000 ms raised to 5000 ms | slow traces are kept: `exporter otlp_grpc/honeycomb receives 2 item(s)` |
+| `probe-user-agent-rule-removed` | `kube-probe` condition deleted | probes are identified by user agent: `telemetry is dropped` |
+| `baseline-always-sample` | an `always_sample` policy added | fast healthy traces are not sampled: `telemetry is dropped` |
+
+### Example: `errors-policy-removed`
+
+```diff title="regressions/errors-policy-removed.patch"
+--- a/collector.yaml
++++ b/collector.yaml
+@@ -27,10 +27,6 @@
+     num_traces: 50000
+     expected_new_traces_per_sec: 1000
+     policies:
+-      - name: errors
+-        type: status_code
+-        status_code:
+-          status_codes: [ERROR]
+       - name: slow
+         type: latency
+         latency:
+```
+
+Output with the patch applied (real output, filtered to the affected test):
+
+```text
+otel-test v0.1.0
+
+Collector: v0.164.0
+Config:    collector.yaml
+Tests:     1
+
+✗ error traces are kept in full
+
+    ✗ exporter otlp_grpc/honeycomb receives 3 item(s)
+      Expected: 3 spans
+      Actual:   0 spans
+      Exporter: otlp_grpc/honeycomb
+      Received: nothing
+
+0 passed, 1 failed
+
+Time: 2.60s
+error: 1 test(s) failed
+```
+
+## Not covered
+
+- Probabilistic policies: they hash the trace ID, so results are deterministic per fixture but say little about the configured rate.
+- Rate limiting across many traces: one fixture is injected per test.

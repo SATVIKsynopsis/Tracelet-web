@@ -1,0 +1,103 @@
+---
+title: otel-test test
+description: Run the test suite against the real Collector.
+icon: Play
+---
+
+```text
+Usage: otel-test test [OPTIONS]
+
+Options:
+  -f, --file <FILE>           [default: otel-test.yaml]
+  -v, --verbose
+      --color <COLOR>         [default: auto] [possible values: auto, always, never]
+      --filter <FILTER>
+      --collector-bin <PATH>
+      --offline
+```
+
+Loads the test file, resolves the Collector (downloading it on first use), rewrites the config, then runs every
+selected test in its own Collector process, one after another.
+
+## Output
+
+```text
+otel-test v0.1.0
+
+Collector: v0.164.0
+Config:    collector.yaml
+Tests:     1
+
+✗ two spans expected
+
+    ✗ exporter otlp_http/backend receives 2 item(s)
+      Expected: 2 spans
+      Actual:   1 span
+      Exporter: otlp_http/backend
+      Received: otlp_http/backend: 1 span
+    ✗ attribute http.response.status_code equals "200"
+      Expected: http.response.status_code = "200" (string) on every span
+      Actual:   1 of 1 spans failed
+                  span "POST /login" at otlp_http/backend: http.response.status_code = 200 (int, item)
+
+0 passed, 1 failed
+
+Time: 3.45s
+error: 1 test(s) failed
+```
+
+Each test is marked `✓` (passed), `✗` (failed) or `!` (error, with the reason). Only failed assertions are
+shown unless `--verbose` is set. Plan-time warnings, for example about `groupbytrace` timing, are printed under the
+test.
+
+## `--filter`
+
+Runs only tests whose name contains the given text, ignoring case:
+
+```bash
+otel-test test --filter redact
+```
+
+If nothing matches, the run fails with exit code 2:
+
+```text
+error: no tests match filter "nope" (3 test(s) defined)
+```
+
+## `--verbose`
+
+Adds the Collector binary path, the config rewrite notes, each test's duration, every assertion including passed
+ones, notes such as telemetry captured during shutdown, and, for failed tests, the Collector's own log output:
+
+```text
+Collector: v0.164.0 (/Users/you/Library/Caches/otel-test/otelcol-contrib/0.164.0-darwin_arm64/otelcol-contrib)
+Config:    collector.yaml
+Tests:     1
+
+Configuration rewrite:
+  - receiver otlp replaced by otlp/otel_test.otlp on 127.0.0.1:55270 (traces, logs)
+  - exporter otlp_http/backend replaced by otlp_http/otel_test.otlp_http/backend (traces, logs)
+  - extension health_check/otel_test added on 127.0.0.1:55271 for readiness checks
+
+✓ health checks are dropped (2134ms)
+    ✓ telemetry is dropped
+
+1 passed, 0 failed
+
+Time: 2.63s
+```
+
+## Collector selection
+
+`--collector-bin PATH` and `--offline` work as described in [CLI flags](/docs/cli/flags#collector-options).
+
+## Exit status
+
+`0` when every selected test passed, `1` when any assertion failed. Configuration, Collector and execution problems
+have their own codes. See [Exit codes](/docs/cli/exit-codes).
+
+## Duration
+
+Expect roughly: Collector startup (about 150 ms warm on an Apple Silicon Mac), plus the observation window
+(the full `timeout` for tests with `dropped`, `count` or `absent`), plus graceful shutdown. Tests run
+sequentially.

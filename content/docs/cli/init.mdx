@@ -1,0 +1,68 @@
+---
+title: otel-test init
+description: Write the starter project into a directory.
+icon: FolderPlus
+---
+
+```text
+Usage: otel-test init [OPTIONS] [DIR]
+
+Arguments:
+  [DIR]  [default: .]
+
+Options:
+      --force
+```
+
+Writes five files into `DIR`, creating directories as needed:
+
+| File | Contents |
+| --- | --- |
+| `otel-test.yaml` | Three tests |
+| `collector.yaml` | A Collector config that deletes passwords, hashes `user.name` and drops `/healthz` spans |
+| `fixtures/login-span.json` | `POST /login` span with `password` and `user.name` |
+| `fixtures/login-log.json` | Log record with `password`, `user.name` and `client.address` |
+| `fixtures/healthz-span.json` | `GET /healthz` span |
+
+These are identical to [`examples/password-redaction`](https://github.com/SATVIKsynopsis/Tracelet/tree/main/examples/password-redaction).
+`init` doesn't need the Collector and doesn't download anything.
+
+## Examples
+
+```bash
+otel-test init
+```
+
+```text
+otel-test v0.1.0
+
+  created ./otel-test.yaml
+  created ./collector.yaml
+  created ./fixtures/login-span.json
+  created ./fixtures/login-log.json
+  created ./fixtures/healthz-span.json
+
+Next: run `otel-test test`
+```
+
+With a directory, the next-step hint includes `-f`:
+
+```bash
+otel-test init my-tests
+# Next: run `otel-test test -f my-tests/otel-test.yaml`
+```
+
+## Existing files
+
+`init` refuses to overwrite and writes nothing if **any** of the five files already exists:
+
+```text
+error: refusing to overwrite existing files (use --force):
+  - ./otel-test.yaml
+  - ./collector.yaml
+  - ./fixtures/login-span.json
+  - ./fixtures/login-log.json
+  - ./fixtures/healthz-span.json
+```
+
+That exits with code 2. Pass `--force` to overwrite them. Other files in the directory are never touched.

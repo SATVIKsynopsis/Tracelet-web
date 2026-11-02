@@ -1,0 +1,60 @@
+---
+title: Examples overview
+description: Five production-style Collector configs, each with tests and deliberate regressions the tests must catch.
+icon: LayoutGrid
+---
+
+The repository's [`examples/real-world`](https://github.com/SATVIKsynopsis/Tracelet/tree/main/examples/real-world)
+directory has five independent examples. Each one has a realistic `collector.yaml`, OTLP/JSON fixtures, an
+`otel-test.yaml` suite, and `regressions/` patches that break the config in realistic ways. They run against the
+pinned otelcol-contrib v0.164.0, with no mocks.
+
+| Example | Scenario | Key components | Tests | Regressions |
+| --- | --- | --- | --: | --: |
+| [PII redaction](/docs/examples/pii-redaction) | allowlist and masking of span attributes | `redaction` | 3 | 2 |
+| [Tenant routing](/docs/examples/tenant-routing) | per-tenant backends, default route, error fan-out | `routing`, `forward`, `filter` | 5 | 3 |
+| [Sampling and filtering](/docs/examples/sampling-filtering) | drop probes, keep errors, slow and enterprise traces | `filter`, `tail_sampling` | 6 | 4 |
+| [Metrics transformation](/docs/examples/metrics-transform) | semconv rename, cardinality reduction, runtime noise | `transform`, `metrics_transform`, `filter`, `resource` | 5 | 4 |
+| [Log redaction](/docs/examples/log-redaction) | secrets in JSON bodies, pseudonymization, IP truncation | `transform` (OTTL), `filter` | 6 | 4 |
+
+## Run one suite
+
+```bash
+git clone https://github.com/SATVIKsynopsis/Tracelet.git
+cd Tracelet
+otel-test test -f examples/real-world/02-tenant-routing/otel-test.yaml
+```
+
+## Positive and negative validation
+
+`verify.sh` proves that every suite passes on the original config **and** fails on each regression:
+
+```bash
+examples/real-world/verify.sh                          # every example, about 7 minutes
+examples/real-world/verify.sh 03-sampling-filtering    # one example
+```
+
+For each example it:
+
+1. runs the suite against the original `collector.yaml`, which must exit 0;
+2. for every `regressions/<name>.patch`:
+   - applies the patch;
+   - runs the suite, which must exit 1, with every `test name :: assertion` line in `regressions/<name>.expect`
+     reported as failed;
+   - reverts the patch, checks that `collector.yaml` is byte-identical to the original, and runs again, which
+     must exit 0.
+
+It needs `patch` and `shasum`. It uses `otel-test` from `PATH`, or `target/release/otel-test`, or `$OTEL_TEST`.
+
+## Bugs these examples found in their own configs
+
+Both were mistakes made while writing the examples, kept because they are the kind of mistake Tracelet exists to
+catch:
+
+- **PII redaction:** a `redaction` allowlist also strips *resource* attributes, so every span lost `service.name`.
+- **Log redaction:** the secret-key pattern `api[_.]?key` missed `x-api-key`, so a live API key reached Loki.
+
+## The starter project
+
+[`examples/password-redaction`](https://github.com/SATVIKsynopsis/Tracelet/tree/main/examples/password-redaction)
+is the project `otel-test init` generates. See [Quick start](/docs/quick-start).

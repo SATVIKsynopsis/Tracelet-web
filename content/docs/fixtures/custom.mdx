@@ -1,0 +1,60 @@
+---
+title: Custom fixtures
+description: Writing your own fixtures, the OTLP/JSON rules that trip people up, and capturing real telemetry.
+icon: PencilRuler
+---
+
+Tracelet has no fixture DSL, generators or templating. Any valid OTLP/JSON export request is a fixture, and
+that's the only format supported. This page covers how to produce them.
+
+## Start from a bundled fixture
+
+The repository's [`fixtures/`](https://github.com/SATVIKsynopsis/Tracelet/tree/main/fixtures) directory has
+fixtures that were each checked by posting them to otelcol-contrib v0.164.0:
+
+| File | Contents |
+| --- | --- |
+| `traces/app-span.json` | Normal `GET /api/orders` server span, status OK |
+| `traces/healthz-span.json` | `GET /healthz` span (`http.route = /healthz`) |
+| `traces/error-span.json` | `POST /api/charge` on `payment-api`, status ERROR, `http.response.status_code = 500` |
+| `traces/login-span.json` | `POST /login` span with `password` and `user.name` attributes |
+| `logs/login-log.json` | Log record with `password`, `user.name`, `client.address` attributes |
+| `metrics/http-requests.json` | Cumulative monotonic sum with two data points (status 200 and 500) |
+
+Copy one and change the attributes to trigger the behavior you're testing.
+
+## OTLP/JSON rules
+
+These follow the [OTLP JSON encoding](https://opentelemetry.io/docs/specs/otlp/#json-protobuf-encoding).
+Breaking them gives a decode error at plan time, or a fixture the Collector rejects.
+
+- Field names are **lowerCamelCase**: `resourceSpans`, `startTimeUnixNano`, not `resource_spans`.
+- `traceId` and `spanId` are **hex** strings of 32 and 16 characters, not base64.
+- 64-bit integers are **strings**: `"intValue": "500"`, `"timeUnixNano": "1735689600000000000"`, `"asInt": "42"`.
+- Enums are **integers**: span `kind` (`2` = SERVER), status `code` (`1` = OK, `2` = ERROR),
+  `aggregationTemporality` (`2` = CUMULATIVE), `severityNumber` (`9` = INFO).
+- One fixture holds one signal. Put traces and logs in separate files and separate tests.
+
+## Capture real telemetry
+
+To start from what your services actually send, run a Collector with a `debug` exporter, or a `file` exporter
+with JSON output, and copy a request. Then trim it:
+
+- remove everything that doesn't affect the behavior under test;
+- replace secrets and personal data with obvious fakes (`hunter2`, `alice@example.com`);
+- fix IDs and timestamps so the fixture is deterministic.
+
+## Check a fixture without running tests
+
+```bash
+otel-test validate
+```
+
+`validate` decodes every fixture referenced by the test file and reports the signal and item count for each test:
+
+```text
+  • passwords are removed from spans (1 span via otlp, timeout 2000ms)
+      - attribute password is absent
+      - attribute http.route equals "/login"
+      - exporter otlp_http/backend receives 1 item(s)
+```

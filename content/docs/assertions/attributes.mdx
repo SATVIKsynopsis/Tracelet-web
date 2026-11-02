@@ -1,0 +1,128 @@
+---
+title: Attribute assertions
+description: present, absent, equals and matches, with levels, exporter scoping and type-strict comparison.
+icon: Tag
+---
+
+An attribute assertion names a key with `attribute:` and exactly one check:
+
+```yaml
+expect:
+  - attribute: password
+    absent: true
+  - attribute: user.name
+    matches: "[0-9a-f]{64}"
+  - attribute: http.response.status_code
+    equals: 201
+  - attribute: http.response.status_code
+    level: item
+    present: true
+```
+
+| Check | Passes when |
+| --- | --- |
+| `present: true` | every captured item has the attribute |
+| `absent: true` | no captured item has the attribute, at any looked-up level |
+| `equals: V` | every captured item has the attribute with value `V`, of the same type |
+| `matches: RE` | every captured item has a **string** value that matches `RE` **in full** |
+
+`present: false` and `absent: false` are rejected. Use the other check instead.
+
+## Every item, and at least one
+
+An attribute assertion must hold for **every** item in scope: all items captured at all exporters, or only those
+at the exporter named by `exporter:`. It also **fails if no item was captured**:
+
+```text
+✗ attribute password is absent
+  Expected: password absent from every span
+  Actual:   no spans captured
+```
+
+So a redaction test can't pass because the telemetry was dropped, misrouted or never arrived. If dropping is the
+intended behavior, test it separately with [`dropped: true`](/docs/assertions/dropped).
+
+## `equals` is type-strict
+
+OTLP attribute values are typed, and `equals` compares the type as well as the value:
+
+| YAML | Matches OTLP value |
+| --- | --- |
+| `equals: 500` | `{ "intValue": "500" }` |
+| `equals: "500"` | `{ "stringValue": "500" }` |
+| `equals: 49.95` | `{ "doubleValue": 49.95 }` |
+| `equals: true` | `{ "boolValue": true }` |
+
+`500` (int), `"500"` (string) and `500.0` (double) are all different. On a mismatch, the failure shows the
+actual type:
+
+```text
+✗ attribute http.response.status_code equals "200"
+  Expected: http.response.status_code = "200" (string) on every span
+  Actual:   1 of 1 spans failed
+              span "POST /login" at otlp_http/backend: http.response.status_code = 200 (int, item)
+```
+
+Only scalars can be compared: strings, integers, floats and booleans. `null`, lists, maps and YAML tags are
+rejected. To check that an attribute is missing, use `absent: true`. Integers must fit in a signed 64-bit integer.
+
+Quote YAML values that would otherwise be parsed as another type. `equals: "1111"` is a string. `equals: 1111` is an
+integer.
+
+## `matches` is anchored
+
+The pattern is wrapped as `^(?:RE)$`, so it must match the **whole** value. `matches: "[0-9a-f]{64}"` passes for
+a SHA-256 hex digest and fails for `"abc"` or for a digest with a prefix. Use `.*` to match part of a value:
+`matches: ".*@example\\.com"`.
+
+`matches` fails on non-string values (`http.response.status_code = 200 is a int, not a string`). Patterns use
+Rust [`regex`](https://docs.rs/regex/latest/regex/#syntax) syntax: no look-around and no backreferences. An
+invalid pattern is reported when the file is loaded.
+
+## Levels
+
+OTLP attributes live at three levels: the **resource** (for example `service.name`), the instrumentation
+**scope**, and the **item** itself (the span, log record or data point). Choose with `level:`:
+
+| `level` | Looks up |
+| --- | --- |
+| `any` (default) | item, then scope, then resource. The first match is used. |
+| `item` | the item's own attributes only |
+| `scope` | scope attributes only |
+| `resource` | resource attributes only |
+
+With `absent` and `level: any`, the attribute must be absent at all three levels. This catches a secret that was
+deleted from spans but still sits on the resource.
+
+```yaml
+- attribute: service.name
+  level: resource
+  equals: payments
+- attribute: http.route
+  level: item
+  equals: /checkout
+```
+
+## Scoping to one exporter
+
+Add `exporter:` to check only what one exporter received. Use it when exporters see different data, for example
+after routing:
+
+```yaml
+- attribute: tenant.id
+  exporter: otlp_http/acme
+  equals: acme
+```
+
+The exporter must be one that a pipeline uses. If nothing reached it, the failure lists what was received
+elsewhere:
+
+```text
+Actual:   no spans captured at datadog
+Received: otlp_http/backend: 1 span
+```
+
+## Failure output
+
+Failures list up to five offending items, each with a label (the span or metric name, or the log body), the
+exporter it reached, its value, and the level it was found at. Longer lists end with `… and N more`.

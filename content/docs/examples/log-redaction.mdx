@@ -1,0 +1,307 @@
+---
+title: Log redaction
+description: Secrets in JSON log bodies and attributes, pseudonymized user IDs and truncated client IPs, with OTTL.
+icon: EyeOff
+---
+
+Application logs go to Loki and to a compliance archive. Some services log **JSON strings as the body**,
+so secrets can hide inside the body as well as in attributes. One `transform` processor (OTTL):
+
+1. parses JSON bodies into attributes (`ParseJSON` and `merge_maps`) and promotes `message` to the body;
+2. deletes every attribute whose key looks like a secret (`delete_matching_keys`);
+3. pseudonymizes `user.id` with `SHA256`, so logs stay joinable;
+4. masks the local part of e-mail addresses and truncates client IPs to /24.
+
+`filter` drops DEBUG logs. **Receivers:** `otlp` and `filelog` (with a `json_parser` operator).
+**Exporters:** `otlp_http` (Loki) and `file`.
+
+Source: [`examples/real-world/05-log-redaction`](https://github.com/SATVIKsynopsis/Tracelet/tree/main/examples/real-world/05-log-redaction)
+
+## Run it
+
+```bash
+git clone https://github.com/SATVIKsynopsis/Tracelet.git
+cd Tracelet
+otel-test test -f examples/real-world/05-log-redaction/otel-test.yaml
+```
+
+The config references credentials and production endpoints exactly as a real config would. otel-test
+replaces the exporters, so the variables don't need to be set. All 6 tests pass against the
+unchanged config.
+
+## What is tested
+
+| Test | Protects against |
+| --- | --- |
+| secrets inside JSON bodies are removed | secrets surviving because they were in the body |
+| secret attributes are removed by key pattern | `db.password`, `reset.token` and `x-api-key` leaking |
+| user identifiers are pseudonymized | raw user IDs and e-mails being stored. The exact SHA-256 is checked. |
+| JSON-body logs are pseudonymized too | the same rules not applied to parsed fields. Both exporters must receive the record. |
+| debug logs are dropped | noise and cost |
+| file logs get the same treatment | the `filelog` pipeline differing from OTLP's |
+
+```yaml title="otel-test.yaml"
+collector: ./collector.yaml
+
+defaults:
+  timeout: 2s
+  receiver: otlp
+
+tests:
+  - name: secrets inside JSON bodies are removed
+    input: fixtures/json-body-log.json
+    expect:
+      - attribute: password
+        absent: true
+      - attribute: session_token
+        absent: true
+      # The JSON was parsed, not just discarded.
+      - attribute: event
+        equals: login
+
+  - name: secret attributes are removed by key pattern
+    input: fixtures/structured-log.json
+    expect:
+      - attribute: db.password
+        absent: true
+      - attribute: reset.token
+        absent: true
+      - attribute: http.request.header.x-api-key
+        absent: true
+      - attribute: event
+        equals: password_reset
+
+  - name: user identifiers are pseudonymized
+    input: fixtures/structured-log.json
+    expect:
+      - attribute: user.id
+        # SHA-256 of "u-1002" (shasum -a 256): stable, so logs stay joinable.
+        equals: 9222f9e2c70724702691185338c9b1c5781ff4cafee48296d4887ca37ca1401a
+      - attribute: user.email
+        equals: "***@example.org"
+      - attribute: client.address
+        equals: 198.51.100.0
+
+  - name: JSON-body logs are pseudonymized too
+    input: fixtures/json-body-log.json
+    expect:
+      - attribute: user.id
+        matches: "[0-9a-f]{64}"
+      - attribute: user.email
+        equals: "***@example.com"
+      - attribute: client.address
+        equals: 203.0.113.0
+      - exporter: otlp_http/loki
+        count: 1
+      - exporter: file/archive
+        count: 1
+
+  - name: debug logs are dropped
+    input: fixtures/debug-log.json
+    expect:
+      - dropped: true
+
+  - name: file logs get the same treatment
+    input: fixtures/json-body-log.json
+    receiver: filelog/app
+    expect:
+      - attribute: password
+        absent: true
+      - attribute: user.email
+        equals: "***@example.com"
+```
+
+The expected hash in `user identifiers are pseudonymized` was computed with `shasum -a 256` for
+`u-1002`, so the test checks the exact output of OTTL's `SHA256`, not just its shape.
+
+## The Collector config
+
+```yaml title="collector.yaml"
+# Application logs to Loki and a compliance archive. Logs arrive from files and
+# from OTLP SDKs; some services log JSON strings as the body. Secrets must be
+# removed wherever they appear, user identifiers pseudonymized, and client IPs
+# anonymized before anything is stored.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  filelog/app:
+    include: [/var/log/app/*.log]
+    start_at: end
+    operators:
+      - type: json_parser
+        if: body matches "^\\{"
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 1024
+
+  filter/debug:
+    error_mode: ignore
+    logs:
+      log_record:
+        - severity_number != SEVERITY_NUMBER_UNSPECIFIED and severity_number < SEVERITY_NUMBER_INFO
+
+  transform/privacy:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          # SDKs that log JSON strings: lift the fields into attributes first,
+          # so the rules below see them.
+          - merge_maps(attributes, ParseJSON(body), "upsert") where IsString(body) and IsMatch(body, "^\\s*\\{")
+          - set(body, attributes["message"]) where attributes["message"] != nil
+          - delete_key(attributes, "message")
+          # Secrets: removed by key name, wherever they came from.
+          - delete_matching_keys(attributes, "(?i).*(password|passwd|secret|token|api[-_.]?key).*")
+          # Pseudonymize, keep joinable.
+          - set(attributes["user.id"], SHA256(attributes["user.id"])) where attributes["user.id"] != nil
+          - replace_pattern(attributes["user.email"], "^[^@]+@", "***@")
+          # Keep the /24 only.
+          - replace_pattern(attributes["client.address"], "^(\\d+\\.\\d+\\.\\d+)\\.\\d+$", "$$1.0")
+
+  batch:
+    timeout: 200ms
+
+exporters:
+  otlp_http/loki:
+    endpoint: https://loki.internal/otlp
+    headers:
+      X-Scope-OrgID: platform
+  file/archive:
+    path: /var/lib/otelcol/archive/logs.jsonl
+    rotation:
+      max_megabytes: 100
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp, filelog/app]
+      processors: [memory_limiter, filter/debug, transform/privacy, batch]
+      exporters: [otlp_http/loki, file/archive]
+```
+
+## A fixture
+
+```json title="fixtures/json-body-log.json"
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "auth"
+            }
+          }
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": {
+            "name": "auth.logging",
+            "version": "1.0.0"
+          },
+          "logRecords": [
+            {
+              "timeUnixNano": "1735689600000000000",
+              "observedTimeUnixNano": "1735689600000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "body": {
+                "stringValue": "{\"message\": \"login succeeded\", \"event\": \"login\", \"user.id\": \"u-1001\", \"user.email\": \"alice@example.com\", \"password\": \"hunter2\", \"session_token\": \"9f8e7d6c\"}"
+              },
+              "attributes": [
+                {
+                  "key": "client.address",
+                  "value": {
+                    "stringValue": "203.0.113.7"
+                  }
+                }
+              ],
+              "traceId": "5b8efff798038103d269b633813fc60f",
+              "spanId": "eee19b7ec3c1b177"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+## Regressions it catches
+
+Each `regressions/<name>.patch` is a realistic edit to `collector.yaml`. Each `.expect` file lists the
+assertions, as `test name :: assertion`, that must fail when the patch is applied.
+
+| Patch | Change | Fails |
+| --- | --- | --- |
+| `delete-before-json-parse` | secret deletion moved before JSON parsing | secrets inside JSON bodies are removed: `attribute password is absent`<br />secrets inside JSON bodies are removed: `attribute session_token is absent`<br />file logs get the same treatment: `attribute password is absent` |
+| `token-pattern-dropped` | `token` removed from the key pattern | secrets inside JSON bodies are removed: `attribute session_token is absent`<br />secret attributes are removed by key pattern: `attribute reset.token is absent` |
+| `hash-removed` | `SHA256` statement deleted | user identifiers are pseudonymized: `attribute user.id equals "9222f9e2c70724702691185338c9b1c5781ff4cafee48296d4887ca37ca1401a"`<br />JSON-body logs are pseudonymized too: `attribute user.id matches /[0-9a-f]{64}/` |
+| `debug-filter-not-in-pipeline` | processor defined but not listed in the pipeline | debug logs are dropped: `telemetry is dropped` |
+
+### Example: `delete-before-json-parse`
+
+```diff title="regressions/delete-before-json-parse.patch"
+--- a/collector.yaml
++++ b/collector.yaml
+@@ -34,11 +34,10 @@
+         statements:
+           # SDKs that log JSON strings: lift the fields into attributes first,
+           # so the rules below see them.
++          - delete_matching_keys(attributes, "(?i).*(password|passwd|secret|token|api[-_.]?key).*")
+           - merge_maps(attributes, ParseJSON(body), "upsert") where IsString(body) and IsMatch(body, "^\\s*\\{")
+           - set(body, attributes["message"]) where attributes["message"] != nil
+           - delete_key(attributes, "message")
+-          # Secrets: removed by key name, wherever they came from.
+-          - delete_matching_keys(attributes, "(?i).*(password|passwd|secret|token|api[-_.]?key).*")
+           # Pseudonymize, keep joinable.
+           - set(attributes["user.id"], SHA256(attributes["user.id"])) where attributes["user.id"] != nil
+           - replace_pattern(attributes["user.email"], "^[^@]+@", "***@")
+```
+
+Output with the patch applied (real output, filtered to the affected test):
+
+```text
+otel-test v0.1.0
+
+Collector: v0.164.0
+Config:    collector.yaml
+Tests:     1
+
+✗ secrets inside JSON bodies are removed
+
+    ✗ attribute password is absent
+      Expected: password absent from every log record
+      Actual:   2 of 2 log records failed
+                  log record "login succeeded" at otlp_http/loki: password = "hunter2" (item)
+                  log record "login succeeded" at file/archive: password = "hunter2" (item)
+    ✗ attribute session_token is absent
+      Expected: session_token absent from every log record
+      Actual:   2 of 2 log records failed
+                  log record "login succeeded" at otlp_http/loki: session_token = "9f8e7d6c" (item)
+                  log record "login succeeded" at file/archive: session_token = "9f8e7d6c" (item)
+
+0 passed, 1 failed
+
+Time: 2.74s
+error: 1 test(s) failed
+```
+
+## Found while writing this example
+
+The first version used the pattern `api[_.]?key`, which does **not** match `x-api-key` (hyphen). The
+structured-log test failed, showing the live key `sk_live_51Hx` at both exporters. The pattern is now
+`api[-_.]?key`.
+
+## Not covered
+
+- **Log bodies, severity and trace context are not assertable.** The tests check the parsed fields as attributes, but not that the body became `"login succeeded"`.
+- The `filelog` receiver and its `json_parser` operator don't run. otel-test replaces receivers, so injecting through `filelog/app` tests only the processors after it. That is why this config parses JSON bodies in `transform`, where it can be tested.

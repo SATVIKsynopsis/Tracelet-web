@@ -1,12 +1,18 @@
 import type { BaseLayoutProps } from 'fumadocs-ui/layouts/shared';
-import { appName, gitConfig } from './shared';
+import { Wordmark } from '@/components/site/logo';
+import { repo, site } from './site';
 
 export function baseOptions(): BaseLayoutProps {
   return {
     nav: {
-      // JSX supported
-      title: appName,
+      title: <Wordmark />,
+      url: '/',
     },
-    githubUrl: `https://github.com/${gitConfig.user}/${gitConfig.repo}`,
+    githubUrl: repo.url,
+    themeSwitch: { enabled: false },
+    links: [
+      { text: 'Home', url: '/' },
+      { text: `Releases (${site.version})`, url: repo.releases, external: true },
+    ],
   };
 }

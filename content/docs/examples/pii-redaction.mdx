@@ -1,0 +1,246 @@
+---
+title: PII redaction
+description: An attribute allowlist with the redaction processor, tested for leaks and for over-redaction.
+icon: ShieldCheck
+---
+
+A payment service's spans carry card numbers, e-mail addresses, an `Authorization` header and a
+password. The gateway Collector applies an **allowlist**: every attribute that isn't listed is deleted, and values
+that look like card numbers or e-mail addresses are masked even on allowed keys.
+
+**Components:** `redaction`, `memory_limiter`, `batch`, and an `otlp_http` exporter with a file-backed sending
+queue (`file_storage` extension).
+
+Source: [`examples/real-world/01-pii-redaction`](https://github.com/SATVIKsynopsis/Tracelet/tree/main/examples/real-world/01-pii-redaction)
+
+## Run it
+
+```bash
+git clone https://github.com/SATVIKsynopsis/Tracelet.git
+cd Tracelet
+otel-test test -f examples/real-world/01-pii-redaction/otel-test.yaml
+```
+
+The config references credentials and production endpoints exactly as a real config would. otel-test
+replaces the exporters, so the variables don't need to be set. All 3 tests pass against the
+unchanged config.
+
+## What is tested
+
+| Test | Protects against |
+| --- | --- |
+| attributes outside the allowlist are deleted | card number, password and auth header leaving the Collector |
+| e-mail addresses are masked on allowed keys | `blocked_values` patterns being lost |
+| operational attributes survive redaction | **over-redaction**: an allowlist so strict that `http.route`, the status code, the amount (a double) or `service.name` disappear |
+
+```yaml title="otel-test.yaml"
+collector: ./collector.yaml
+
+defaults:
+  timeout: 2s
+
+tests:
+  - name: attributes outside the allowlist are deleted
+    input: fixtures/checkout-span.json
+    expect:
+      - attribute: payment.card.number
+        absent: true
+      - attribute: user.password
+        absent: true
+      - attribute: http.request.header.authorization
+        absent: true
+      - exporter: otlp_http/vendor
+        count: 1
+
+  - name: e-mail addresses are masked on allowed keys
+    input: fixtures/checkout-span.json
+    expect:
+      - attribute: user.email
+        equals: "****"
+
+  # Guards against over-redaction: a too-strict policy is also a regression.
+  - name: operational attributes survive redaction
+    input: fixtures/checkout-span.json
+    expect:
+      - attribute: http.route
+        level: item
+        equals: /checkout
+      - attribute: http.response.status_code
+        equals: 201
+      - attribute: payment.amount
+        equals: 49.95
+      - attribute: payment.card.last4
+        equals: "1111"
+      - attribute: service.name
+        level: resource
+        equals: payments
+```
+
+Note the mix of types in the over-redaction test: `equals: 201` is an integer, `equals: 49.95` a double,
+and `equals: "1111"` a string. `equals` is type-strict, so each must match the fixture's OTLP type.
+
+## The Collector config
+
+```yaml title="collector.yaml"
+# Payment service gateway. Spans may carry card numbers, e-mail addresses and
+# credentials; only an allowlist of attributes may leave the Collector.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+
+  # Allowlist: every span attribute not listed is deleted. Values that look
+  # like card numbers or e-mail addresses are masked even on allowed keys.
+  # The allowlist also applies to *resource* attributes, so service.name and
+  # the environment must be listed or every span loses its service.
+  redaction/pii:
+    allow_all_keys: false
+    allowed_keys:
+      - service.name
+      - deployment.environment.name
+      - http.request.method
+      - http.route
+      - http.response.status_code
+      - payment.card.last4
+      - payment.amount
+      - user.email
+    blocked_values:
+      - "4[0-9]{12}(?:[0-9]{3})?"                          # Visa
+      - "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}"   # e-mail
+    summary: info
+
+  batch:
+    timeout: 200ms
+
+exporters:
+  otlp_http/vendor:
+    endpoint: https://otlp.vendor.example.com
+    headers:
+      x-api-key: ${env:VENDOR_API_KEY}
+    sending_queue:
+      enabled: true
+      storage: file_storage/queue
+
+extensions:
+  file_storage/queue:
+    directory: /var/lib/otelcol/queue
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check, file_storage/queue]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, redaction/pii, batch]
+      exporters: [otlp_http/vendor]
+```
+
+## A fixture
+
+```json title="fixtures/checkout-span.json"
+{
+  "resourceSpans": [
+    {
+      "resource": {"attributes": [
+        {"key": "service.name", "value": {"stringValue": "payments"}},
+        {"key": "deployment.environment.name", "value": {"stringValue": "production"}}
+      ]},
+      "scopeSpans": [
+        {
+          "scope": {"name": "payments.http", "version": "2.3.1"},
+          "spans": [
+            {
+              "traceId": "0af7651916cd43dd8448eb211c80319c",
+              "spanId": "b7ad6b7169203331",
+              "name": "POST /checkout",
+              "kind": 2,
+              "startTimeUnixNano": "1735689600000000000",
+              "endTimeUnixNano": "1735689600250000000",
+              "attributes": [
+                {"key": "http.request.method", "value": {"stringValue": "POST"}},
+                {"key": "http.route", "value": {"stringValue": "/checkout"}},
+                {"key": "http.response.status_code", "value": {"intValue": "201"}},
+                {"key": "payment.card.number", "value": {"stringValue": "4111111111111111"}},
+                {"key": "payment.card.last4", "value": {"stringValue": "1111"}},
+                {"key": "payment.amount", "value": {"doubleValue": 49.95}},
+                {"key": "user.email", "value": {"stringValue": "alice@example.com"}},
+                {"key": "http.request.header.authorization", "value": {"stringValue": "Bearer eyJhbGciOiJIUzI1NiJ9.secret"}},
+                {"key": "user.password", "value": {"stringValue": "hunter2"}}
+              ],
+              "status": {"code": 1}
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+## Regressions it catches
+
+Each `regressions/<name>.patch` is a realistic edit to `collector.yaml`. Each `.expect` file lists the
+assertions, as `test name :: assertion`, that must fail when the patch is applied.
+
+| Patch | Change | Fails |
+| --- | --- | --- |
+| `allowlist-password` | `user.password` added to `allowed_keys` "for debugging" | attributes outside the allowlist are deleted: `attribute user.password is absent` |
+| `email-mask-removed` | e-mail regex dropped from `blocked_values` | e-mail addresses are masked on allowed keys: `attribute user.email equals "****"` |
+
+### Example: `allowlist-password`
+
+```diff title="regressions/allowlist-password.patch"
+--- a/collector.yaml
++++ b/collector.yaml
+@@ -29,6 +29,7 @@
+       - payment.card.last4
+       - payment.amount
+       - user.email
++      - user.password
+     blocked_values:
+       - "4[0-9]{12}(?:[0-9]{3})?"                          # Visa
+       - "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}"   # e-mail
+```
+
+Output with the patch applied (real output, filtered to the affected test):
+
+```text
+otel-test v0.1.0
+
+Collector: v0.164.0
+Config:    collector.yaml
+Tests:     1
+
+✗ attributes outside the allowlist are deleted
+
+    ✗ attribute user.password is absent
+      Expected: user.password absent from every span
+      Actual:   1 of 1 spans failed
+                  span "POST /checkout" at otlp_http/vendor: user.password = "hunter2" (item)
+
+0 passed, 1 failed
+
+Time: 4.19s
+error: 1 test(s) failed
+```
+
+## Found while writing this example
+
+The first version of this config forgot that **the allowlist also applies to resource attributes**.
+Every span lost `service.name`. The over-redaction test caught it on the first run, and the config now lists
+`service.name` and `deployment.environment.name`. A test that only checked for leaks would have passed.
+
+## Not covered
+
+- The `redaction` processor also adds summary attributes (`redaction.redacted.keys`, `redaction.masked.count`, …). They are not asserted here.
+- The exporter's `sending_queue` and the `file_storage` extension are replaced by otel-test, so persistence is not exercised. Its `${env:VENDOR_API_KEY}` doesn't need to be set.

@@ -1,16 +1,23 @@
-import Link from 'next/link';
+import { Demo } from '@/components/home/demo';
+import { Features } from '@/components/home/features';
+import { FinalCta } from '@/components/home/final-cta';
+import { Hero } from '@/components/home/hero';
+import { HowItWorks } from '@/components/home/how-it-works';
+import { Install } from '@/components/home/install';
+import { Scope } from '@/components/home/scope';
+import { UseCases } from '@/components/home/use-cases';
 
 export default function HomePage() {
   return (
-    <div className="flex flex-col justify-center text-center flex-1">
-      <h1 className="text-2xl font-bold mb-4">Hello World</h1>
-      <p>
-        You can open{' '}
-        <Link href="/docs" className="font-medium underline">
-          /docs
-        </Link>{' '}
-        and see the documentation.
-      </p>
-    </div>
+    <>
+      <Hero />
+      <Demo />
+      <Features />
+      <HowItWorks />
+      <UseCases />
+      <Scope />
+      <Install />
+      <FinalCta />
+    </>
   );
 }

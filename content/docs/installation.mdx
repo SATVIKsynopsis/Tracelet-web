@@ -1,0 +1,131 @@
+---
+title: Installation
+description: Install the otel-test binary from a GitHub release and let it fetch the pinned Collector.
+icon: Download
+---
+
+Tracelet `v0.1.0` is published as prebuilt archives on
+[GitHub Releases](https://github.com/SATVIKsynopsis/Tracelet/releases/tag/v0.1.0).
+
+| Platform | Release archive | Shell installer |
+| --- | --- | --- |
+| macOS, Apple Silicon | `otel-test-aarch64-apple-darwin.tar.gz` | Yes |
+| macOS, Intel | `otel-test-x86_64-apple-darwin.tar.gz` | Yes |
+| Linux x86_64 (glibc) | `otel-test-x86_64-unknown-linux-gnu.tar.gz` | Yes |
+| Linux aarch64 (glibc) | `otel-test-aarch64-unknown-linux-gnu.tar.gz` | Yes |
+| Windows x86_64 | `otel-test-x86_64-pc-windows-msvc.zip` | No |
+
+Each archive has a sibling `.sha256` file.
+
+## macOS and Linux
+
+```bash
+curl -fsSL https://github.com/SATVIKsynopsis/Tracelet/releases/latest/download/install.sh | sh
+```
+
+The installer:
+
+1. detects the OS with `uname -s` and the architecture with `uname -m`;
+2. downloads `otel-test-<target>.tar.gz` and its `.sha256` file with `curl` (or `wget`);
+3. compares the SHA-256 with `sha256sum` (or `shasum`) and stops on a mismatch;
+4. copies `otel-test` to `~/.local/bin`, and tells you if that directory isn't on your `PATH`.
+
+It reads two environment variables. Because the script runs in `sh`, set them for `sh`:
+
+```bash
+curl -fsSL https://github.com/SATVIKsynopsis/Tracelet/releases/latest/download/install.sh \
+  | OTEL_TEST_VERSION=v0.1.0 OTEL_TEST_INSTALL_DIR=/usr/local/bin sh
+```
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `OTEL_TEST_VERSION` | `latest` | Release tag to install, for example `v0.1.0` |
+| `OTEL_TEST_INSTALL_DIR` | `$HOME/.local/bin` | Where `otel-test` is copied |
+
+If `~/.local/bin` isn't on your `PATH`, add it to your shell profile:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+## Windows
+
+The shell installer exits with an error on Windows. Download the `.zip` from the release instead. In PowerShell:
+
+```powershell
+Invoke-WebRequest -OutFile otel-test.zip `
+  https://github.com/SATVIKsynopsis/Tracelet/releases/download/v0.1.0/otel-test-x86_64-pc-windows-msvc.zip
+Expand-Archive otel-test.zip -DestinationPath .
+.\otel-test-x86_64-pc-windows-msvc\otel-test.exe --version
+```
+
+Move `otel-test.exe` to a directory on your `PATH`. To check the archive, compare
+`(Get-FileHash otel-test.zip -Algorithm SHA256).Hash` with the release's `.zip.sha256` file.
+
+<Callout type="warn" title="Windows support is early">
+  Windows has no graceful stop signal for the Collector, so Tracelet kills it at the end of each test. Telemetry
+  still held by a buffering processor such as `batch` or `tail_sampling` is not flushed. A `dropped: true`
+  assertion can then pass because data was still buffered, not because it was dropped. Keep `batch` timeouts
+  and `decision_wait` well below the test timeout.
+</Callout>
+
+## From source
+
+Building from source needs Rust 1.88 or newer:
+
+```bash
+git clone https://github.com/SATVIKsynopsis/Tracelet.git
+cd Tracelet
+cargo install --path crates/otel-test-cli
+```
+
+## Verify the install
+
+```bash
+otel-test --version
+```
+
+```text
+otel-test 0.1.0
+```
+
+## The Collector binary
+
+`otel-test` doesn't bundle the Collector. The first command that needs one (`test` or `validate`) downloads
+**otelcol-contrib v0.164.0** for your platform (about 100 MB). Before it is unpacked, the download is checked
+against a SHA-256 compiled into `otel-test`. The binary is then cached:
+
+| OS | Default cache directory |
+| --- | --- |
+| macOS | `~/Library/Caches/otel-test` |
+| Linux | `$XDG_CACHE_HOME/otel-test` |
+| Windows | `%LOCALAPPDATA%\otel-test` |
+
+While downloading, it prints:
+
+```text
+Downloading otelcol-contrib 0.164.0 (darwin_arm64) and verifying its SHA-256…
+```
+
+Checksums are compiled in for `darwin_amd64`, `darwin_arm64`, `linux_386`, `linux_amd64`, `linux_arm64`,
+`linux_armv7`, `linux_ppc64le`, `linux_riscv64`, `linux_s390x`, `windows_386`, `windows_amd64` and
+`windows_arm64`.
+
+To use a Collector you already have instead:
+
+```bash
+otel-test test --collector-bin /usr/local/bin/otelcol-contrib
+# or
+export OTEL_TEST_COLLECTOR_BIN=/usr/local/bin/otelcol-contrib
+```
+
+A custom build works if it includes the `otlp` receiver and the `otlp_http` exporter (or `otlphttp` on older
+builds). If it also includes the `health_check` extension, Tracelet uses it to check readiness.
+
+| Variable | Effect |
+| --- | --- |
+| `OTEL_TEST_COLLECTOR_BIN` | Collector binary to use. `--collector-bin` takes precedence. |
+| `OTEL_TEST_CACHE_DIR` | Cache directory for downloaded Collectors |
+| `OTEL_TEST_DOWNLOAD_BASE_URL` | Mirror to download the release from. Checksums are still enforced. |
+
+Pass `--offline` to forbid the download. If the Collector isn't cached, the command fails with exit code 4.

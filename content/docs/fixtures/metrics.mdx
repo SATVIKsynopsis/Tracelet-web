@@ -1,0 +1,97 @@
+---
+title: Metric fixtures
+description: OTLP/JSON metric fixtures, data points as items, and what metric tests can check.
+icon: ChartLine
+---
+
+A metric fixture has a top-level `resourceMetrics` array. This is `fixtures/metrics/http-requests.json` from the
+repository: a cumulative, monotonic sum with two data points.
+
+```json title="fixtures/metrics/http-requests.json"
+{
+  "resourceMetrics": [
+    {
+      "resource": {
+        "attributes": [
+          { "key": "service.name", "value": { "stringValue": "checkout" } },
+          { "key": "deployment.environment.name", "value": { "stringValue": "test" } }
+        ]
+      },
+      "scopeMetrics": [
+        {
+          "scope": { "name": "otel-test.fixtures", "version": "1.0.0" },
+          "metrics": [
+            {
+              "name": "http.server.request.count",
+              "unit": "{request}",
+              "description": "Number of HTTP requests served",
+              "sum": {
+                "aggregationTemporality": 2,
+                "isMonotonic": true,
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1735689540000000000",
+                    "timeUnixNano": "1735689600000000000",
+                    "asInt": "42",
+                    "attributes": [
+                      { "key": "http.route", "value": { "stringValue": "/api/orders" } },
+                      { "key": "http.response.status_code", "value": { "intValue": "200" } }
+                    ]
+                  },
+                  {
+                    "startTimeUnixNano": "1735689540000000000",
+                    "timeUnixNano": "1735689600000000000",
+                    "asInt": "3",
+                    "attributes": [
+                      { "key": "http.route", "value": { "stringValue": "/api/orders" } },
+                      { "key": "http.response.status_code", "value": { "intValue": "500" } }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+## Fields that matter
+
+| Field | Format |
+| --- | --- |
+| metric type | One of `sum`, `gauge`, `histogram`, `exponentialHistogram`, `summary` |
+| `aggregationTemporality` | Integer: `1` delta, `2` cumulative |
+| `asInt` | 64-bit integer **as a string** (`"42"`) |
+| `asDouble` | A JSON number |
+| `startTimeUnixNano`, `timeUnixNano` | Nanoseconds since the epoch, as a string |
+
+## Data points are the items
+
+For metrics, every assertion counts and inspects **data points**: one per sum or gauge point, and one per
+histogram or summary point. A `count` assertion is a data-point count, which makes it a good check for
+aggregation. In the [metrics transformation example](/docs/examples/metrics-transform), four input points form
+three distinct series, so exactly three points must reach each exporter after `aggregate_labels`:
+
+```yaml
+- name: user.id is aggregated away
+  input: fixtures/http-requests.json
+  expect:
+    - attribute: user.id
+      absent: true
+    - exporter: prometheus_remote_write/mimir
+      count: 3
+    - exporter: prometheus/local
+      count: 3
+```
+
+Attributes on data points are item-level attributes (`level: item`).
+
+## What you can't assert
+
+- **Metric names and values.** Tracelet can't check that a metric was renamed, or that `aggregate_labels` summed
+  40 + 25 into 65 rather than averaging. Data-point counts and attributes catch most mistakes, but not these.
+- **Behavior over time.** One fixture is one export request, so `cumulative_to_delta` and other processors that
+  need a series of points can't be tested meaningfully.

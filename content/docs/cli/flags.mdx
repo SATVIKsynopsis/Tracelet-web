@@ -1,0 +1,64 @@
+---
+title: CLI flags
+description: Every command-line option and environment variable otel-test reads.
+icon: Flag
+---
+
+## Global options
+
+These are accepted by every command.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `-f, --file <FILE>` | `otel-test.yaml` | Test file to load. `init` accepts it but ignores it. |
+| `--color <WHEN>` | `auto` | `auto`, `always` or `never` |
+| `-h, --help` | | Print help |
+| `-V, --version` | | Print `otel-test 0.1.0` |
+
+## `test` options
+
+| Option | Description |
+| --- | --- |
+| `-v, --verbose` | Show rewrite notes, durations, passed assertions, notes and Collector logs on failure |
+| `--filter <TEXT>` | Run only tests whose name contains `TEXT`, ignoring case |
+| `--collector-bin <PATH>` | Collector binary to use |
+| `--offline` | Never download the Collector |
+
+## `validate` options
+
+| Option | Description |
+| --- | --- |
+| `--collector-bin <PATH>` | Collector binary to use |
+| `--offline` | Never download the Collector |
+
+## `init` arguments
+
+| Argument or option | Description |
+| --- | --- |
+| `[DIR]` | Target directory, default `.` |
+| `--force` | Overwrite existing starter files |
+
+## Collector options
+
+The Collector binary is resolved in this order:
+
+1. `--collector-bin <PATH>`
+2. `OTEL_TEST_COLLECTOR_BIN`
+3. the cached pinned release, otelcol-contrib v0.164.0
+4. a download of the pinned release, unless `--offline` is set
+
+With `--offline` and nothing cached, the command fails with exit code 4 and names the expected cache path.
+
+## Environment variables
+
+| Variable | Effect |
+| --- | --- |
+| `OTEL_TEST_COLLECTOR_BIN` | Collector binary to use. `--collector-bin` takes precedence. |
+| `OTEL_TEST_CACHE_DIR` | Cache directory. The default is `~/Library/Caches/otel-test` on macOS, `$XDG_CACHE_HOME/otel-test` on Linux and `%LOCALAPPDATA%\otel-test` on Windows. |
+| `OTEL_TEST_DOWNLOAD_BASE_URL` | Mirror for the Collector release download. Checksums are still enforced. |
+| `NO_COLOR`, `CLICOLOR_FORCE` | Standard color control, used when `--color auto` |
+| `RUST_LOG` | Internal diagnostics on stderr, for example `RUST_LOG=otel_test_core=debug` |
+
+The installer script reads `OTEL_TEST_VERSION` and `OTEL_TEST_INSTALL_DIR`. See [Installation](/docs/installation).
+
+`${env:…}` references in your processors are resolved by the Collector from the environment `otel-test` runs in.

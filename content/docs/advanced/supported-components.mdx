@@ -1,0 +1,69 @@
+---
+title: Supported components
+description: Which Collector components run, which are replaced, and the special cases verified against v0.164.0.
+icon: Boxes
+---
+
+Tracelet has no allowlist of processors. It runs the real Collector, so **any processor or connector in the
+Collector build runs**, with your settings. What matters is where a component sits in the pipeline graph.
+
+| Component kind | Treatment |
+| --- | --- |
+| Receivers (any type) | Replaced by a local OTLP/HTTP receiver. Each receiver is an injection point for its pipelines. |
+| Processors (any type) | Run verbatim, in pipeline order |
+| Connectors (any type) | Run verbatim. They route between pipelines. |
+| Exporters (any type) | Replaced by a capture exporter that keeps the original ID |
+| Extensions | Kept if a processor or connector references them. Otherwise removed. |
+
+## Signals
+
+| Signal | Supported |
+| --- | --- |
+| Traces | Yes |
+| Logs | Yes |
+| Metrics | Yes |
+| Profiles | No. `profiles` pipelines are rejected. |
+
+## Exercised by the examples and tests
+
+These components appear in the repository's [examples](/docs/examples) or integration tests and have been run
+against otelcol-contrib v0.164.0:
+
+| Kind | Components |
+| --- | --- |
+| Processors | `attributes`, `batch`, `filter` (OTTL), `memory_limiter`, `metrics_transform`, `redaction`, `resource`, `tail_sampling`, `transform` (OTTL, including `ParseJSON`, `merge_maps`, `delete_matching_keys`, `SHA256`, `replace_pattern`) |
+| Connectors | `routing`, `forward` |
+| Receivers (as injection points) | `otlp`, `prometheus`, `filelog` |
+| Exporters (as capture points) | `otlp_http`, `otlp_grpc`, `kafka`, `prometheus_remote_write`, `prometheus`, `file` |
+| Extensions | `file_storage`, `bearertokenauth`, `basicauth` and `health_check` (removed, as documented) |
+
+Other components should work the same way, but aren't covered by tests in the repository.
+
+## Special cases
+
+These were verified against v0.164.0:
+
+| Component | Behavior under Tracelet |
+| --- | --- |
+| `batch` | Flushed at graceful shutdown, so its output is captured for the right test |
+| `tail_sampling` | Pending traces are decided at graceful shutdown |
+| `interval` | Flushed at graceful shutdown |
+| `groupbytrace` | **Discards** pending traces at shutdown. Tracelet warns when `wait_duration` (default 1 s) isn't shorter than the timeout. |
+| `span_metrics`, `service_graph` | Emit only on their flush timer, never at shutdown. Tracelet warns when `metrics_flush_interval` is unset or not shorter than the timeout. |
+| `k8s_attributes` | Never becomes ready outside a cluster unless `passthrough: true`. A startup error with a hint is reported. |
+| `resource_detection` | Cloud detectors (for example `ec2`) start, but add their timeout to every test's startup |
+| `redaction` | Its allowlist also applies to resource attributes |
+
+## Collector builds
+
+The default is the pinned **otelcol-contrib v0.164.0** release, downloaded and verified automatically. Another
+build can be used with `--collector-bin` if it includes:
+
+- the `otlp` receiver, which Tracelet uses for injection;
+- the `otlp_http` exporter, or `otlphttp` on builds that predate the rename, which Tracelet uses for capture.
+
+The `health_check` extension is used for readiness checks when the build includes it. On startup, Tracelet runs
+the binary with `--version` and `components` to check this.
+
+Component names: v0.164.0 accepts both old and new spellings (`otlphttp` and `otlp_http`, `metricstransform`
+and `metrics_transform`, `k8sattributes` and `k8s_attributes`), and Tracelet copies whichever you wrote.

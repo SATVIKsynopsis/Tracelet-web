@@ -1,0 +1,82 @@
+---
+title: Collector configuration
+description: Which Collector configs Tracelet accepts, how receivers are chosen, and what is rejected.
+icon: Server
+---
+
+Point `collector:` at the config you deploy. You don't need a test-specific copy: Tracelet rewrites the
+receivers and exporters itself, and leaves the rest alone.
+
+## Requirements
+
+Tracelet analyzes the raw YAML (after applying `<<` merge keys) before rewriting it. A config is accepted
+when:
+
+- the root is a mapping, and `receivers`, `processors`, `exporters`, `connectors` and `extensions` are mappings
+  of component IDs;
+- `service.pipelines` has at least one pipeline;
+- each pipeline ID is `traces`, `metrics` or `logs`, optionally with a name (`traces/acme`);
+- each pipeline has at least one receiver and one exporter;
+- every referenced receiver, processor, exporter, connector and `service.extensions` entry is defined;
+- no connector ID is also used as a receiver or exporter ID.
+
+Problems are reported together, with locations such as `service.pipelines.traces.processors`, and exit with
+code 3. After rewriting, the config must also pass `otelcol validate`. A failure there is exit code 3 too, never
+a test result.
+
+## Rejected
+
+| Construct | Why |
+| --- | --- |
+| `profiles` pipelines | Not supported: `profiles pipelines are not supported by otel-test` |
+| A provider reference instead of a section or list, such as `exporters: ${file:exporters.yaml}` | The structure can't be analyzed without resolving it. Inline the content. |
+
+`${env:VAR}` references **inside** component settings are fine. Processor settings keep them and the Collector
+resolves them from the environment Tracelet runs in. Receivers and exporters are replaced, so their
+`${env:…}` values (API keys, tokens) don't need to be set.
+
+## Choosing the receiver
+
+Each receiver used by a pipeline gets its own replacement, so a test must enter the graph through one of them.
+For each test:
+
+1. If the test (or `defaults`) sets `receiver:`, that receiver is used. It must feed a pipeline of the
+   fixture's signal.
+2. Otherwise, if exactly one receiver feeds a pipeline of that signal, it's chosen automatically.
+3. Otherwise, the test is rejected:
+
+```text
+several receivers feed metrics pipelines (otlp, prometheus); set `receiver:` on the test or in `defaults`
+```
+
+Receivers are followed through connectors: a receiver "feeds" every pipeline reachable from it.
+
+Injecting through a non-OTLP receiver such as `prometheus` or `filelog/app` posts the OTLP/JSON fixture to that
+receiver's replacement. The pipeline behind it is tested, but the receiver's own parsing is not.
+
+## Exporters
+
+Every exporter used by a pipeline is replaced by a capture exporter that keeps its ID. Assertions use those
+IDs (`otlp_http/backend`, `kafka/shared`, `prometheus_remote_write/mimir`). An assertion naming an exporter that
+no pipeline uses is rejected and lists the exporters that are available:
+
+```text
+test "wrong exporter".expect[0]: exporter "datadog" is not used by any pipeline (exporters: otlp_http/backend)
+```
+
+## Extensions
+
+An extension is kept only if a processor or connector references its ID, directly or through another kept
+extension (for example a `file_storage` used by a processor). Extensions used only by receivers or exporters
+(`bearertokenauth`, `basicauth`, an exporter queue's storage) or by nothing (`health_check`, `pprof`, `zpages`)
+are removed, because they would bind fixed ports or need credentials. Every removal is listed in the
+rewrite notes printed by `otel-test validate` and `otel-test test --verbose`.
+
+`health_check/otel_test` is a reserved ID. Tracelet adds it for readiness checks.
+
+## Component names
+
+otelcol-contrib v0.164.0 renamed several components, and the old names are still accepted as aliases:
+`otlp` / `otlp_grpc`, `otlphttp` / `otlp_http`, `metricstransform` / `metrics_transform`, `k8sattributes` /
+`k8s_attributes`, `spanmetrics` / `span_metrics`, `servicegraph` / `service_graph`. Tracelet copies processors
+and connectors verbatim, so either spelling works.

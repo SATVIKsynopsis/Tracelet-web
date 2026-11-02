@@ -1,0 +1,68 @@
+---
+title: Fixture configuration
+description: How fixtures are referenced, validated and matched to a signal and receiver.
+icon: FileBraces
+---
+
+A test references its fixture with `input:`, relative to the test file:
+
+```yaml
+tests:
+  - name: passwords are removed from logs
+    input: fixtures/login-log.json
+    expect:
+      - attribute: password
+        absent: true
+```
+
+## Format
+
+A fixture is one OTLP/JSON export request. It must be a JSON object with **exactly one** of these top-level
+keys:
+
+| Top-level key | Signal | Protobuf message |
+| --- | --- | --- |
+| `resourceSpans` | traces | `ExportTraceServiceRequest` |
+| `resourceLogs` | logs | `ExportLogsServiceRequest` |
+| `resourceMetrics` | metrics | `ExportMetricsServiceRequest` |
+
+The signal is inferred from that key. If a test sets `signal:`, it must agree:
+
+```text
+test declares `signal: logs` but the fixture contains traces
+```
+
+## Validation
+
+Before any Collector starts, each fixture is:
+
+1. parsed as JSON;
+2. checked for exactly one signal key. A fixture with several signals is rejected, because it isn't a single
+   export request;
+3. decoded as the matching OTLP request, which catches wrong field types and malformed IDs;
+4. checked to contain at least one item (span, log record or data point).
+
+A snake_case key gets a hint:
+
+```text
+expected one of `resourceSpans`, `resourceMetrics` or `resourceLogs` at the top level, found ["resource_spans"] (OTLP/JSON uses lowerCamelCase field names, e.g. `resourceSpans`)
+```
+
+Fixture problems are reported during planning, together with receiver and exporter problems, and exit with
+code 2.
+
+## Injection
+
+The file's bytes are posted unchanged to the test's receiver as `application/json`. The Collector must answer
+with HTTP 2xx and no `partialSuccess` rejection. Otherwise the test is an execution error (exit code 5).
+Fixtures are posted without custom headers, so routing on request metadata can't be tested.
+
+## Organizing fixtures
+
+- Reuse one fixture across several tests: the [PII redaction example](/docs/examples/pii-redaction) runs three
+  tests on `checkout-span.json`.
+- Keep IDs and timestamps fixed, so runs are deterministic.
+- Put a whole trace in one fixture when a processor works on traces. `tail_sampling` decides per trace.
+
+See [Span fixtures](/docs/fixtures/spans), [Log fixtures](/docs/fixtures/logs) and
+[Metric fixtures](/docs/fixtures/metrics) for complete examples.

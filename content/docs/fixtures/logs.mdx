@@ -1,0 +1,87 @@
+---
+title: Log fixtures
+description: OTLP/JSON log fixtures, including JSON-string bodies for parsing tests.
+icon: ScrollText
+---
+
+A log fixture has a top-level `resourceLogs` array. This is `fixtures/login-log.json` from the starter project:
+
+```json title="fixtures/login-log.json"
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          { "key": "service.name", "value": { "stringValue": "auth" } },
+          { "key": "deployment.environment.name", "value": { "stringValue": "test" } }
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": { "name": "otel-test.fixtures", "version": "1.0.0" },
+          "logRecords": [
+            {
+              "timeUnixNano": "1735689600000000000",
+              "observedTimeUnixNano": "1735689600000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "body": { "stringValue": "login attempt" },
+              "attributes": [
+                { "key": "user.name", "value": { "stringValue": "alice" } },
+                { "key": "password", "value": { "stringValue": "hunter2" } },
+                { "key": "client.address", "value": { "stringValue": "203.0.113.7" } }
+              ],
+              "traceId": "5b8efff798038103d269b633813fc60f",
+              "spanId": "eee19b7ec3c1b177"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+## Fields that matter
+
+| Field | Format |
+| --- | --- |
+| `timeUnixNano`, `observedTimeUnixNano` | Nanoseconds since the epoch, as a string |
+| `severityNumber` | Integer: `5` DEBUG, `9` INFO, `13` WARN, `17` ERROR |
+| `severityText` | Free text, for example `"INFO"` |
+| `body` | An `AnyValue`, usually `{ "stringValue": "…" }` |
+| `traceId`, `spanId` | Hex, optional |
+
+Filters on severity use `severityNumber`. The [log redaction example](/docs/examples/log-redaction) drops records
+with `severity_number < SEVERITY_NUMBER_INFO`, and its `debug-log.json` fixture uses `"severityNumber": 5`.
+
+## JSON in the body
+
+Some services log a JSON string as the body. A fixture can reproduce that by escaping the JSON inside
+`stringValue`, as `json-body-log.json` in the log redaction example does:
+
+```json
+"body": {
+  "stringValue": "{\"message\": \"login succeeded\", \"event\": \"login\", \"user.id\": \"u-1001\", \"user.email\": \"alice@example.com\", \"password\": \"hunter2\", \"session_token\": \"9f8e7d6c\"}"
+}
+```
+
+That example's `transform` processor lifts the fields into attributes with `ParseJSON` and `merge_maps`, and the
+tests assert on the resulting attributes:
+
+```yaml
+- name: secrets inside JSON bodies are removed
+  input: fixtures/json-body-log.json
+  expect:
+    - attribute: password
+      absent: true
+    - attribute: session_token
+      absent: true
+    - attribute: event
+      equals: login
+```
+
+## What you can't assert
+
+Log **bodies** and **severity** can't be asserted. If a processor rewrites the body, test what it does to
+attributes, or that the record is dropped or delivered.

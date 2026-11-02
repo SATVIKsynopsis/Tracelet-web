@@ -1,0 +1,56 @@
+---
+title: Assertion limitations
+description: What the assertion engine can't check, and how to test around it.
+icon: TriangleAlert
+---
+
+Assertions cover **attributes** and **delivery** (where items go, and how many). Everything below is outside
+what Tracelet v0.1.0 can assert.
+
+## Fields that can't be asserted
+
+| Signal | Not assertable |
+| --- | --- |
+| Traces | span name, kind, status, events, links, timing |
+| Logs | body, severity number and text, trace context |
+| Metrics | metric name, description, unit, type, data point values, temporality |
+
+These fields still reach the Collector and drive your processors: a filter on `severity_number`, a sampling
+policy on `status.code`, or a `transform` on the body. You can test their **effect** on attributes and delivery,
+but not the fields themselves.
+
+Ways to work around this:
+
+- **Status or severity filters:** assert `dropped: true` or a `count` on the alerting exporter.
+- **Body parsing:** assert on the attributes the parser produced, as the [log redaction example](/docs/examples/log-redaction) does.
+- **Aggregation:** assert the resulting data-point `count`, and that dropped labels are `absent`.
+- **Metric renames:** not testable today.
+
+## Value checks
+
+- `equals` must hold for **every** item. There is no "one of" check. An attribute that differs between items
+  (status `200` on one data point and `500` on another) can only be checked with `present` or `matches`.
+- There is no way to assert an attribute's type without its exact value.
+- `matches` works on strings only.
+- Only scalar values can be compared. Arrays, maps and bytes can't be matched with `equals`.
+
+## Timing-dependent output
+
+- Connectors that emit on a timer (`span_metrics`, `service_graph`) need `metrics_flush_interval` below the test
+  timeout, and emit repeatedly. Avoid `count` on their output.
+- `groupbytrace` discards pending traces at shutdown, so `dropped` can pass for the wrong reason when its
+  `wait_duration` isn't shorter than the timeout. Tracelet warns.
+
+## Stateful processors
+
+One test injects one fixture into a fresh Collector. Processors whose behavior depends on several requests over
+time, such as `cumulative_to_delta`, rate limiting or probabilistic sampling rates, can't be exercised
+meaningfully. A fixture can still hold many items, such as a whole trace or several data points, so per-request
+behavior is testable.
+
+## Not observable by design
+
+- Anything the receiver would have done, because receivers are replaced.
+- Anything the exporter or backend would have done, because exporters are replaced and no backend is contacted.
+
+See [Known limitations](/docs/advanced/limitations) for limitations outside the assertion engine.

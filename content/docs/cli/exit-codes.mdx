@@ -1,0 +1,45 @@
+---
+title: Exit codes
+description: What each otel-test exit code means, and what causes it.
+icon: CircleSlash
+---
+
+| Code | Meaning | Typical causes |
+| --- | --- | --- |
+| `0` | All selected tests passed | |
+| `1` | At least one assertion failed | A redaction rule removed, routing changed |
+| `2` | Usage error, or invalid spec or fixture | YAML error in `otel-test.yaml`, missing file, unknown field, a bad duration, an exporter or receiver that doesn't match the config, `--filter` matching nothing, `init` refusing to overwrite |
+| `3` | Collector config invalid or unsupported | Undefined component, `profiles` pipeline, provider reference in a structural position, `otelcol validate` rejecting the rewritten config |
+| `4` | Collector unavailable, or failed to start | Download failed, `--offline` with no cache, binary missing a required component, a startup timeout, `k8s_attributes` outside a cluster |
+| `5` | Execution error | Fixture rejected by the Collector, Collector crashed or exited with an error, capture server rejected a request |
+| `130` | Interrupted | Ctrl-C. The Collector is killed and temporary files are removed. |
+
+Codes are checked in this order: a Collector startup failure (4) wins over execution errors (5), which win over
+failed assertions (1).
+
+## Errors are never passes
+
+A test that couldn't be executed is reported with `!` and counted as an error, not as passed or failed:
+
+```text
+1 passed, 0 failed, 1 error(s)
+```
+
+That run exits with code 5. A run where the Collector didn't start exits with code 4, even if earlier tests
+passed.
+
+## In CI
+
+Any non-zero exit should fail the job. If you want to tell failures apart:
+
+```bash
+otel-test test
+status=$?
+case $status in
+  0) echo "all tests passed" ;;
+  1) echo "a pipeline behavior regressed" ;;
+  2|3) echo "the spec or the config is invalid" ;;
+  *) echo "the test run itself failed ($status)" ;;
+esac
+exit $status
+```

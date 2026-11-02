@@ -1,0 +1,91 @@
+---
+title: Tracelet configuration
+description: Every field of otel-test.yaml, with defaults and validation rules.
+icon: FileCode
+---
+
+The test file is `otel-test.yaml` in the current directory by default. Use `-f` to point at another one:
+`otel-test test -f path/to/otel-test.yaml`.
+
+```yaml title="otel-test.yaml"
+collector: ./collector.yaml   # required; relative to this file
+
+defaults:                     # optional
+  timeout: 3s                 # observation window: 100ms–10m, default 3s
+  receiver: otlp              # receiver to inject through, when ambiguous
+
+tests:
+  - name: unique name         # required; used by --filter
+    input: fixtures/x.json    # required; OTLP/JSON fixture, relative to this file
+    signal: traces            # optional: traces | metrics | logs (inferred from the fixture)
+    receiver: otlp/internal   # optional: receiver ID from your config to inject through
+    timeout: 5s               # optional; overrides defaults.timeout
+    expect:                   # required; at least one assertion
+      - attribute: password
+        absent: true
+```
+
+Unknown keys are rejected at every level, so a typo such as `expects:` is an error rather than a silently
+ignored field.
+
+## Top level
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `collector` | yes | Path to the Collector config, relative to the test file. It must exist. |
+| `defaults` | no | Defaults for every test. |
+| `tests` | yes | List of tests. It needs at least one. |
+
+## `defaults`
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `timeout` | `3s` | Observation window for each test. |
+| `receiver` | none | Receiver to inject through when a test doesn't set `receiver`. |
+
+## Test fields
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `name` | yes | Non-empty and unique within the file. Shown in output and matched by `--filter`. |
+| `input` | yes | Path to an OTLP/JSON fixture, relative to the test file. It must exist. |
+| `signal` | no | `traces`, `metrics` or `logs`. Usually inferred. If set, it must match the fixture. |
+| `receiver` | no | ID of a receiver in your config, such as `otlp` or `filelog/app`. Overrides `defaults.receiver`. |
+| `timeout` | no | Overrides `defaults.timeout` for this test. |
+| `expect` | yes | List of assertions. It needs at least one. See [Assertions](/docs/assertions/attributes). |
+
+## Durations
+
+A duration is an integer followed by `ms`, `s` or `m`, written as a string: `500ms`, `1500ms`, `2s`, `1m`.
+Fractions (`1.5s`) and compound values (`1m30s`) are not accepted. A bare number is rejected with a hint:
+
+```text
+tests[0].timeout: 3 has no unit; write e.g. "3s" or "3ms"
+```
+
+Timeouts must be between `100ms` and `10m`.
+
+### Choosing a timeout
+
+The timeout is how long Tracelet watches the exporters after injecting the fixture. It must be longer than any
+buffering in the pipeline, such as a `batch` timeout or a `tail_sampling` `decision_wait`, or a short
+`metrics_flush_interval` on `span_metrics`. Tests with only positive assertions usually finish early. Tests with
+`dropped`, `count` or `absent` always take the full timeout, plus Collector startup and shutdown.
+
+## Paths
+
+`collector` and `input` are resolved relative to the directory containing the test file, not the current
+directory. The Collector itself runs with your Collector config's directory as its working directory.
+
+## Error reporting
+
+Every problem in the file is reported at once with its location:
+
+```text
+error: invalid test specification bad.yaml:
+  - tests[0].timeout: 3 has no unit; write e.g. "3s" or "3ms"
+  - tests[0].expect[0].dropped: `dropped: false` is not supported; assert where telemetry should arrive with `exporter:`
+  - tests[0].expect[1]: attribute assertion needs exactly one of `present`, `absent`, `equals` or `matches` (found absent, equals)
+```
+
+A YAML syntax error stops parsing earlier and reports its position. Both cases exit with code 2.

@@ -1,0 +1,141 @@
+---
+title: Troubleshooting
+description: Common errors, what they mean, and how to fix them.
+icon: LifeBuoy
+---
+
+Run `otel-test validate` first: it reports spec, config and fixture problems without starting a Collector. For a
+failing test, rerun it alone with `otel-test test --verbose --filter "<name>"` to see the rewrite notes and the
+Collector's own logs.
+
+## Spec and plan errors (exit 2)
+
+### `several receivers feed … pipelines`
+
+```text
+several receivers feed metrics pipelines (otlp, prometheus); set `receiver:` on the test or in `defaults`
+```
+
+More than one receiver can accept the fixture's signal. Set `receiver:` on the test, or `defaults.receiver` for
+the whole file.
+
+### `exporter "…" is not used by any pipeline`
+
+```text
+test "wrong exporter".expect[0]: exporter "datadog" is not used by any pipeline (exporters: otlp_http/backend)
+```
+
+Use the exporter ID exactly as written in `service.pipelines`, including its `/name` suffix. The message lists the
+valid IDs.
+
+### `"…" is a connector, not an exporter`
+
+Connectors can't be asserted on. Assert on the exporters of the pipelines the connector feeds.
+
+### `receiver "…" does not feed any … pipeline`
+
+The receiver exists, but not in a pipeline of the fixture's signal. For example, a log fixture with
+`receiver: prometheus`.
+
+### Invalid fixture
+
+```text
+not a valid OTLP/JSON traces request: …
+```
+
+Usually one of: snake_case field names, base64 IDs instead of hex, or 64-bit integers written as JSON numbers.
+See [OTLP/JSON rules](/docs/fixtures/custom#otlpjson-rules). A fixture with zero spans, records or data points
+is rejected too.
+
+### `no tests match filter`
+
+`--filter` matched nothing. It's a case-insensitive substring of the test name.
+
+## Config errors (exit 3)
+
+### `provider reference … in place of a mapping is not supported`
+
+A whole section or list comes from `${file:…}` or another provider. Inline it. References inside component
+settings are fine.
+
+### `otelcol validate` rejected the rewritten config
+
+The Collector's own validation failed, for example from an unknown processor field or a processor missing from
+the build. Fix the config: it would fail in production too.
+
+## Collector errors (exit 4)
+
+### The Collector failed to start
+
+The error includes the Collector's log tail, and error-level lines logged earlier. Common causes:
+
+- **`k8s_attributes` outside a cluster.** It logs `Could not initialize kube client` and never becomes ready.
+  Set `passthrough: true` in the config you test, or keep it out of tested pipelines.
+- **A processor that needs an unavailable resource**, such as a storage directory that doesn't exist.
+
+### `--offline` and nothing cached
+
+```text
+Collector 0.164.0 is not cached at … and --offline forbids downloading it
+```
+
+Run once without `--offline`, or set `OTEL_TEST_COLLECTOR_BIN`.
+
+## Execution errors (exit 5)
+
+### Fixture rejected
+
+The Collector answered the injection with a non-2xx status or a `partialSuccess` rejection. The fixture is
+structurally valid OTLP but the Collector refused it. Check the Collector output with `--verbose`.
+
+### The Collector crashed, or exited with an error
+
+A processor panicked or the process exited during the window. `--verbose` shows its logs.
+
+## Assertions that fail unexpectedly
+
+### `Actual: no spans captured`
+
+Attribute assertions fail when nothing arrived. Either the fixture was dropped (filtered, sampled), or it went to a
+different exporter than the one named. With `exporter:` set, the `Received:` line shows where data went.
+
+### `equals` fails although the value looks right
+
+`equals` is type-strict. `http.response.status_code = 200 (int, item)` doesn't equal `"200"`. Remove the
+quotes, or add them, to match the fixture's OTLP type.
+
+### `matches` fails on a partial match
+
+Patterns are anchored to the whole value. Write `.*suffix` or `prefix.*` explicitly.
+
+### A secret is reported at the resource level
+
+`absent` with the default `level: any` also checks resource and scope attributes. The output names the level, for
+example `(resource)`. Either the config doesn't redact resource attributes, or the assertion should use
+`level: item`.
+
+## Timing problems
+
+### `span_metrics` or `service_graph` output never arrives
+
+They emit only on their flush timer, never at shutdown. Set `metrics_flush_interval` below the test timeout.
+Tracelet prints a warning when it isn't.
+
+### `dropped` passes, but you expected data
+
+Check for a `groupbytrace` warning: `groupbytrace` discards pending traces at shutdown. On Windows, buffered data
+in `batch` or `tail_sampling` is lost because the Collector is killed.
+
+### Tests are slow
+
+Tests with `dropped`, `count` or `absent` always wait for their full timeout. Cloud `resource_detection` detectors
+add their timeout to every startup.
+
+## Telemetry outside a test window
+
+```text
+warning: 1 item(s) arrived before this test started and were ignored
+```
+
+Something reached an exporter while no test window was open, for example late output from the previous test's
+Collector. It is never counted towards any test.

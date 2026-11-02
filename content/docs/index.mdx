@@ -1,13 +1,84 @@
 ---
-title: Hello World
-description: Your first document
+title: Introduction
+description: Tracelet runs your OpenTelemetry Collector configuration against fixtures you write and checks what reaches each exporter.
+icon: BookOpen
 ---
 
-Welcome to the docs! You can start writing documents in `/content/docs`.
+Tracelet is an open-source integration testing tool for
+[OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) configurations. It is written in Rust and
+ships as a single binary, `otel-test`.
 
-## What is Next?
+A Collector config encodes policy: what is redacted, what is sampled or dropped, and where each signal goes.
+That policy is usually checked by deploying and looking at a backend. Mistakes such as a processor in the wrong
+order, an OTTL condition that never matches, or a routing table that sends errors to the wrong place then show up
+as leaked credentials or missing data in production.
+
+Tracelet makes that policy testable in CI. It does not simulate the Collector. It runs the real
+`otelcol-contrib` binary, so your processors behave exactly as they do in production.
+
+```yaml title="otel-test.yaml"
+collector: ./collector.yaml
+
+tests:
+  - name: passwords are redacted
+    input: fixtures/login-span.json
+    expect:
+      - attribute: password
+        absent: true
+
+  - name: health checks are dropped
+    input: fixtures/healthz-span.json
+    expect:
+      - dropped: true
+
+  - name: errors reach datadog
+    input: fixtures/error-span.json
+    expect:
+      - exporter: datadog
+        count: 1
+```
+
+## What a run does
+
+1. Reads and validates `otel-test.yaml`, your Collector config and every fixture.
+2. Rewrites the config: receivers become local OTLP/HTTP endpoints and exporters become capture exporters.
+   Processors, connectors and pipelines are copied verbatim.
+3. Starts the real Collector, once per test.
+4. Posts the test's fixture to a receiver.
+5. Captures everything that reaches each exporter.
+6. Evaluates your assertions.
+7. Reports passed and failed tests, and exits with a code your CI can act on.
+
+[How Tracelet works](/docs/concepts/how-it-works) covers each step in detail.
+
+## What you can test
+
+- **Redaction.** An attribute is gone, hashed, or masked.
+- **Filtering and sampling.** A health check, a fast healthy trace or a debug log is dropped.
+- **Routing.** Telemetry reaches the right exporter, and only that exporter.
+- **Transformation.** Attributes are renamed, added, or aggregated away.
+- **Processor order.** For example, deletion runs after JSON parsing, not before.
+
+## What Tracelet does not test
+
+Tracelet tests what happens **between** receivers and exporters. It is not an end-to-end test of your
+observability backends.
+
+- Receiver behavior is not tested. Receivers are replaced, so `filelog` operators or Prometheus scraping don't run.
+- Exporter behavior, backends and authentication are not tested.
+- Assertions cover attributes and delivery only. Span names and status, log bodies and severity, and metric names
+  and values can't be asserted.
+
+See [Known limitations](/docs/advanced/limitations) for the full list.
 
 <Cards>
-  <Card title="Learn more about Next.js" href="https://nextjs.org/docs" />
-  <Card title="Learn more about Fumadocs" href="https://fumadocs.dev" />
+  <Card title="Installation" href="/docs/installation" description="Install otel-test on macOS, Linux or Windows." />
+  <Card title="Quick start" href="/docs/quick-start" description="Generate a starter project and run it." />
+  <Card title="Write your first test" href="/docs/first-test" description="Test a config of your own, step by step." />
+  <Card title="Examples" href="/docs/examples" description="Five production-style configs with the regressions they catch." />
 </Cards>
+
+<Callout title="Names">
+  The project is called **Tracelet**. The binary, test file and environment variables use the name `otel-test`
+  (`otel-test.yaml`, `OTEL_TEST_CACHE_DIR`).
+</Callout>

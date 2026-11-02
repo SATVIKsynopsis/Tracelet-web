@@ -1,0 +1,95 @@
+---
+title: How Tracelet works
+description: Planning, config rewriting, per-test Collector lifecycle, capture and evaluation.
+icon: Cog
+---
+
+Every `otel-test test` run goes through the same four phases.
+
+## 1. Parse and plan
+
+The test file, the Collector config and every fixture are loaded and checked. Problems are collected rather than
+reported one at a time, so a single run lists everything that's wrong, each with its location:
+
+```text
+error: invalid test specification bad.yaml:
+  - tests[0].timeout: 3 has no unit; write e.g. "3s" or "3ms"
+  - tests[0].expect[0].dropped: `dropped: false` is not supported; assert where telemetry should arrive with `exporter:`
+  - tests[0].expect[1]: attribute assertion needs exactly one of `present`, `absent`, `equals` or `matches` (found absent, equals)
+```
+
+Each test is then resolved against the config:
+
+- the fixture's signal is inferred from its top-level key;
+- the test is assigned a receiver to inject through (see [Collector configuration](/docs/configuration/collector#choosing-the-receiver));
+- every exporter an assertion names must be used by a pipeline. Naming a connector is an error.
+
+## 2. Rewrite the config
+
+Only the edges of the pipeline graph change:
+
+| Section | What happens |
+| --- | --- |
+| `receivers` | Each receiver used by a pipeline is replaced by an OTLP/HTTP receiver, `otlp/otel_test.<id>`, on its own `127.0.0.1` port. One replacement per original keeps routing between pipelines intact. |
+| `processors` | Copied verbatim. Each pipeline's processor list and its order are copied verbatim. |
+| `connectors` | Copied verbatim, and kept in pipelines. They are internal routing, not edges. |
+| `exporters` | Each exporter used by a pipeline is replaced by an OTLP/HTTP exporter, `otlp_http/otel_test.<id>`, that sends to Tracelet's capture server. Queues and retries are disabled. Results are still reported under the original ID, such as `datadog`. |
+| unused receivers and exporters | Removed, so they aren't validated with production credentials. |
+| `extensions` | Kept only if a processor or connector references them, such as a `storage` extension used by a processor. Others, including auth extensions and `health_check`, are removed. |
+| `service.telemetry` | Replaced: internal metrics are off (no `:8888` port), logs go to stderr so they can be shown on failure. |
+| added | `health_check/otel_test` on a free port, used to detect readiness. |
+
+`${env:…}` references inside processors are left alone and resolved by the Collector from the environment
+Tracelet runs in. The rewritten config is written to a private temporary directory and checked with
+`otelcol validate` before anything runs. The Collector's working directory is your config's directory, so
+relative paths resolve as they would in production.
+
+`otel-test validate` prints every change:
+
+```text
+Configuration rewrite:
+  - receiver otlp replaced by otlp/otel_test.otlp on 127.0.0.1:55207 (traces, logs)
+  - exporter otlp_http/backend replaced by otlp_http/otel_test.otlp_http/backend (traces, logs)
+  - extension health_check/otel_test added on 127.0.0.1:55208 for readiness checks
+```
+
+## 3. Run each test in a fresh Collector
+
+For each test:
+
+1. Start the Collector from the rewritten config and wait until every injection port accepts connections and
+   the health check reports ready. The startup timeout is 30 s.
+2. Open a capture window and `POST` the fixture, byte for byte, as OTLP/JSON to the chosen receiver. The
+   Collector must accept it with HTTP 2xx and no `partialSuccess` rejection. Otherwise the test is an
+   **error** (exit code 5), never a pass.
+3. Observe for the test's `timeout` (3 s by default).
+   - Tests with a `dropped`, `count` or `absent` assertion observe the **full** timeout, because those results
+     can still change as telemetry arrives.
+   - Tests with only positive assertions finish early, once all of them hold and nothing new has arrived for
+     500 ms.
+4. Shut the Collector down gracefully with the window still open, then close the window. On Linux and macOS
+   this sends `SIGTERM` and waits up to 10 s. Telemetry that `batch` or `tail_sampling` were still holding is
+   flushed during shutdown and counted for this test.
+5. Evaluate the assertions on everything captured in the window.
+
+A fresh Collector per test keeps tests isolated. With a shared Collector, a buffering processor could release one
+test's telemetry into the next test's window, and `tail_sampling` state would carry over. A restart costs
+roughly 150–200 ms on an Apple Silicon Mac.
+
+If the Collector crashes, rejects the fixture, exits with an error, or the capture server rejects a request it
+can't decode, the test is reported as an error.
+
+## 4. Report
+
+Each test prints `✓` (passed), `✗` (failed) or `!` (error). Failed assertions show expected and actual values,
+the offending items (up to five) and the exporter that received them. With `--verbose`, passed assertions,
+rewrite notes, timings and, on failure, the Collector's own log output are printed too.
+
+The exit code summarizes the run. See [Exit codes](/docs/cli/exit-codes).
+
+## The capture server
+
+Tracelet starts an in-process capture server on ephemeral `127.0.0.1` ports. It accepts OTLP/HTTP (protobuf or
+JSON, optionally gzip) and OTLP/gRPC. Each rewritten exporter sends to its own path, so every capture is
+recorded under the original exporter ID. Anything that arrives while no test window is open is kept apart and
+reported as a warning. It is never counted towards a test.

@@ -1,0 +1,24 @@
+{
+  "title": "Documentation",
+  "pages": [
+    "---Getting Started---",
+    "index",
+    "installation",
+    "quick-start",
+    "first-test",
+    "---Core Concepts---",
+    "...concepts",
+    "---Configuration---",
+    "...configuration",
+    "---Fixtures---",
+    "...fixtures",
+    "---Assertions---",
+    "...assertions",
+    "---Examples---",
+    "...examples",
+    "---CLI Reference---",
+    "...cli",
+    "---Advanced---",
+    "...advanced"
+  ]
+}

@@ -1,0 +1,74 @@
+---
+title: otel-test validate
+description: Check the spec, fixtures and rewritten config, and show the test plan, without running tests.
+icon: ShieldCheck
+---
+
+```text
+Usage: otel-test validate [OPTIONS]
+
+Options:
+      --collector-bin <PATH>
+  -f, --file <FILE>           [default: otel-test.yaml]
+      --color <COLOR>         [default: auto] [possible values: auto, always, never]
+      --offline
+```
+
+`validate` does everything `test` does before the first test starts:
+
+1. parses and checks the test file;
+2. parses and checks the Collector config;
+3. resolves the Collector binary (downloading it if needed, unless `--offline`);
+4. rewrites the config and prints every change;
+5. runs `otelcol validate` on the rewritten config;
+6. loads every fixture, resolves each test's receiver and exporter references, and prints the plan.
+
+No Collector is started and no telemetry is sent, so it's fast and safe as a first CI step or a pre-commit
+check.
+
+## Output
+
+```text
+otel-test v0.1.0
+
+Collector: v0.164.0 (/Users/you/Library/Caches/otel-test/otelcol-contrib/0.164.0-darwin_arm64/otelcol-contrib)
+Config:    collector.yaml
+Tests:     3
+
+✓ test specification is valid
+
+Configuration rewrite:
+  - receiver otlp replaced by otlp/otel_test.otlp on 127.0.0.1:55207 (traces, logs)
+  - exporter otlp_http/backend replaced by otlp_http/otel_test.otlp_http/backend (traces, logs)
+  - extension health_check/otel_test added on 127.0.0.1:55208 for readiness checks
+
+✓ rewritten Collector configuration passes `otelcol validate`
+
+  • passwords are removed from spans (1 span via otlp, timeout 2000ms)
+      - attribute password is absent
+      - attribute http.route equals "/login"
+      - exporter otlp_http/backend receives 1 item(s)
+  • passwords are removed from logs (1 log record via otlp, timeout 2000ms)
+      - attribute password is absent
+      - attribute user.name matches /[0-9a-f]{64}/
+  • health checks are dropped (1 span via otlp, timeout 2000ms)
+      - telemetry is dropped
+
+✓ all fixtures, receivers and exporter references resolve
+```
+
+Each planned test shows its item count and signal, the receiver it is injected through, its timeout, and every
+assertion in words. Timing warnings appear here too.
+
+## Failures
+
+A spec that doesn't match the config:
+
+```text
+✓ rewritten Collector configuration passes `otelcol validate`
+error: test specification bad2.yaml does not match the Collector configuration:
+  - test "wrong exporter".expect[0]: exporter "datadog" is not used by any pipeline (exporters: otlp_http/backend)
+```
+
+The exit codes are the same as for `test`: 2 for spec problems, 3 for config problems, 4 if the Collector is
+unavailable. See [Exit codes](/docs/cli/exit-codes).

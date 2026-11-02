@@ -1,0 +1,254 @@
+---
+title: Metrics transformation
+description: Semantic-convention renames, cardinality reduction by aggregation, runtime filtering and resource stamping.
+icon: ChartColumn
+---
+
+A metrics gateway in front of Mimir:
+
+1. renames the legacy `http.status_code` label to `http.response.status_code` (`transform`, datapoint context);
+2. removes the high-cardinality `user.id` label by **summing it away** (`metrics_transform`, `aggregate_labels`);
+3. drops Go runtime and `debug.*` metrics (`filter`);
+4. sets `deployment.environment.name` and deletes `host.ip` (`resource`).
+
+The order matters: aggregation keeps only `http.route` and `http.response.status_code`, so the rename must run
+first.
+
+**Receivers:** `otlp` and `prometheus` (scrape config). **Exporters:** `prometheus_remote_write` with
+`basicauth`, and the pull-based `prometheus` exporter.
+
+The request fixture has 4 data points for 3 distinct (route, status) series. After aggregation, exactly 3 data
+points must reach **each** exporter.
+
+Source: [`examples/real-world/04-metrics-transform`](https://github.com/SATVIKsynopsis/Tracelet/tree/main/examples/real-world/04-metrics-transform)
+
+## Run it
+
+```bash
+git clone https://github.com/SATVIKsynopsis/Tracelet.git
+cd Tracelet
+otel-test test -f examples/real-world/04-metrics-transform/otel-test.yaml
+```
+
+The config references credentials and production endpoints exactly as a real config would. otel-test
+replaces the exporters, so the variables don't need to be set. All 5 tests pass against the
+unchanged config.
+
+## What is tested
+
+| Test | Protects against |
+| --- | --- |
+| user.id is aggregated away | cardinality explosion, or aggregation not happening |
+| legacy status code is renamed | broken dashboards |
+| environment is stamped and host.ip removed | wrong environment label, and leaking internal IPs |
+| runtime metrics are dropped | paying for noise |
+| scraped metrics get the same treatment | the `prometheus` receiver's pipeline differing from OTLP's (injected through the `prometheus` receiver's slot) |
+
+```yaml title="otel-test.yaml"
+collector: ./collector.yaml
+
+defaults:
+  timeout: 2s
+  receiver: otlp
+
+tests:
+  - name: user.id is aggregated away
+    input: fixtures/http-requests.json
+    expect:
+      - attribute: user.id
+        absent: true
+      # 4 input points -> 3 series: (/orders,200) (/orders,500) (/cart,200).
+      - exporter: prometheus_remote_write/mimir
+        count: 3
+      - exporter: prometheus/local
+        count: 3
+
+  - name: legacy status code is renamed
+    input: fixtures/http-requests.json
+    expect:
+      - attribute: http.status_code
+        absent: true
+      - attribute: http.response.status_code
+        level: item
+        present: true
+      - attribute: http.route
+        matches: "/(orders|cart)"
+
+  - name: environment is stamped and host.ip removed
+    input: fixtures/http-requests.json
+    expect:
+      - attribute: deployment.environment.name
+        level: resource
+        equals: production
+      - attribute: host.ip
+        absent: true
+
+  - name: runtime metrics are dropped
+    input: fixtures/runtime-metrics.json
+    expect:
+      - dropped: true
+
+  - name: scraped metrics get the same treatment
+    input: fixtures/mixed-scrape.json
+    receiver: prometheus
+    expect:
+      - exporter: prometheus_remote_write/mimir
+        count: 3
+      - attribute: user.id
+        absent: true
+```
+
+Two receivers feed the metrics pipeline, so the suite sets `defaults.receiver: otlp` and the last test
+overrides it with `receiver: prometheus`.
+
+## The Collector config
+
+```yaml title="collector.yaml"
+# Metrics gateway in front of Mimir. Normalizes old semantic conventions,
+# removes a high-cardinality label by aggregation, drops runtime noise and
+# stamps the environment.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: checkout
+          scrape_interval: 15s
+          static_configs:
+            - targets: [checkout.internal:9464]
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 2048
+
+  # Old SDKs still emit http.status_code; dashboards use the new name.
+  # Must run before aggregation, which keeps only the new name.
+  transform/semconv:
+    error_mode: ignore
+    metric_statements:
+      - context: datapoint
+        statements:
+          - set(attributes["http.response.status_code"], attributes["http.status_code"]) where attributes["http.status_code"] != nil
+          - delete_key(attributes, "http.status_code")
+
+  # user.id explodes series cardinality in Mimir. Sum it away.
+  metrics_transform/cardinality:
+    transforms:
+      - include: http.server.request.count
+        action: update
+        operations:
+          - action: aggregate_labels
+            label_set: [http.route, http.response.status_code]
+            aggregation_type: sum
+
+  filter/runtime:
+    error_mode: ignore
+    metrics:
+      metric:
+        - IsMatch(name, "^go_.*")
+        - IsMatch(name, "^debug\\..*")
+
+  resource/env:
+    attributes:
+      - key: deployment.environment.name
+        value: production
+        action: upsert
+      - key: host.ip
+        action: delete
+
+  batch:
+    timeout: 200ms
+
+exporters:
+  prometheus_remote_write/mimir:
+    endpoint: https://mimir.internal/api/v1/push
+    auth:
+      authenticator: basicauth/mimir
+    resource_to_telemetry_conversion:
+      enabled: true
+  prometheus/local:
+    endpoint: 0.0.0.0:8889
+
+extensions:
+  basicauth/mimir:
+    client_auth:
+      username: collector
+      password: ${env:MIMIR_PASSWORD}
+
+service:
+  extensions: [basicauth/mimir]
+  pipelines:
+    metrics:
+      receivers: [otlp, prometheus]
+      processors: [memory_limiter, transform/semconv, metrics_transform/cardinality, filter/runtime, resource/env, batch]
+      exporters: [prometheus_remote_write/mimir, prometheus/local]
+```
+
+Fixtures: `http-requests.json`, `mixed-scrape.json`, `runtime-metrics.json`, in [`fixtures/`](https://github.com/SATVIKsynopsis/Tracelet/tree/main/examples/real-world/04-metrics-transform/fixtures).
+
+## Regressions it catches
+
+Each `regressions/<name>.patch` is a realistic edit to `collector.yaml`. Each `.expect` file lists the
+assertions, as `test name :: assertion`, that must fail when the patch is applied.
+
+| Patch | Change | Fails |
+| --- | --- | --- |
+| `processor-order-swapped` | aggregation runs before the rename | user.id is aggregated away: `exporter prometheus_remote_write/mimir receives 3 item(s)`<br />legacy status code is renamed: `attribute http.response.status_code (item level) is present` |
+| `user-id-kept` | `user.id` added to `label_set` | user.id is aggregated away: `attribute user.id is absent`<br />user.id is aggregated away: `exporter prometheus_remote_write/mimir receives 3 item(s)` |
+| `filter-regex-typo` | `^go_.*` changed to `^go-.*` | runtime metrics are dropped: `telemetry is dropped`<br />scraped metrics get the same treatment: `exporter prometheus_remote_write/mimir receives 3 item(s)` |
+| `resource-insert-not-upsert` | `upsert` changed to `insert`, so an existing `staging` value is never overwritten | environment is stamped and host.ip removed: `attribute deployment.environment.name (resource level) equals "production"` |
+
+### Example: `processor-order-swapped`
+
+```diff title="regressions/processor-order-swapped.patch"
+--- a/collector.yaml
++++ b/collector.yaml
+@@ -80,5 +80,5 @@
+   pipelines:
+     metrics:
+       receivers: [otlp, prometheus]
+-      processors: [memory_limiter, transform/semconv, metrics_transform/cardinality, filter/runtime, resource/env, batch]
++      processors: [memory_limiter, metrics_transform/cardinality, transform/semconv, filter/runtime, resource/env, batch]
+       exporters: [prometheus_remote_write/mimir, prometheus/local]
+```
+
+Output with the patch applied (real output, filtered to the affected test):
+
+```text
+otel-test v0.1.0
+
+Collector: v0.164.0
+Config:    collector.yaml
+Tests:     1
+
+✗ user.id is aggregated away
+
+    ✗ exporter prometheus_remote_write/mimir receives 3 item(s)
+      Expected: 3 data points
+      Actual:   2 data points
+      Exporter: prometheus_remote_write/mimir
+      Received: prometheus/local: 2 data points, prometheus_remote_write/mimir: 2 data points
+    ✗ exporter prometheus/local receives 3 item(s)
+      Expected: 3 data points
+      Actual:   2 data points
+      Exporter: prometheus/local
+      Received: prometheus/local: 2 data points, prometheus_remote_write/mimir: 2 data points
+
+0 passed, 1 failed
+
+Time: 3.05s
+error: 1 test(s) failed
+```
+
+## Not covered
+
+- **Metric names and values are not assertable.** otel-test checks attributes and data-point counts. It can't verify that `aggregate_labels` *summed* (40 + 25 = 65) rather than averaged, or that a metric was renamed.
+- `equals` must hold for every data point, so a label with different values per point (here 200 and 500) can only be checked with `present`. `matches` works on strings only.
+- The `prometheus` receiver's scraping and relabeling don't run. Its pipeline is tested by injecting OTLP into its slot.
+- `cumulative_to_delta` and other stateful processors need a series of points over time. One fixture per test can't exercise them meaningfully.

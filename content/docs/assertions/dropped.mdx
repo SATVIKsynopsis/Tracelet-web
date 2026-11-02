@@ -1,0 +1,62 @@
+---
+title: Telemetry drop assertions
+description: Assert that a fixture is filtered or sampled away entirely, without false passes.
+icon: Ban
+---
+
+`dropped: true` passes when **nothing reaches any exporter**:
+
+```yaml
+- name: health checks are dropped
+  input: fixtures/healthz-span.json
+  expect:
+    - dropped: true
+```
+
+Use it for filters, sampling policies and anything else that should discard the fixture completely.
+
+## What "dropped" requires
+
+A `dropped` assertion passes only if **all** of the following hold:
+
+1. the Collector accepted the fixture (HTTP 2xx, no `partialSuccess` rejection);
+2. the Collector stayed up for the whole window and exited cleanly when stopped;
+3. the capture server rejected no requests;
+4. zero items reached any exporter during the full timeout **and** the graceful shutdown.
+
+Conditions 1–3 are checked for every test. When one fails, the test is an error (exit code 5), not a pass. A
+broken pipeline therefore can't look like a successful filter.
+
+Shutdown matters: `batch` and `tail_sampling` flush buffered telemetry during graceful shutdown, and that output
+is counted. A `dropped` test can't pass just because a `batch` timeout was longer than the observation window.
+
+On failure, the output shows what was exported, and where:
+
+```text
+✗ telemetry is dropped
+  Expected: nothing exported
+  Actual:   1 span exported
+  Received: otlp_http/backend: 1 span
+```
+
+## `dropped` is not vacuous
+
+When the config changes, the same fixture is exported and the test fails. The
+[sampling example](/docs/examples/sampling-filtering) proves this with two of its regression patches: removing
+the `kube-probe` user-agent rule, and adding an `always_sample` baseline policy. Each makes a `dropped: true` test
+fail.
+
+## Rules
+
+- `dropped: false` isn't supported. Assert where telemetry should arrive with `exporter:`.
+- `dropped` can't be combined with `exporter:` or `count:`. To assert that only one exporter received nothing, use
+  `exporter: E` with `count: 0`.
+- `dropped` can't be combined with `attribute:` in the same assertion.
+
+## Caveats
+
+- **`groupbytrace` discards pending traces at shutdown.** If its `wait_duration` (default 1 s) isn't shorter than
+  the test timeout, a trace still waiting is discarded and `dropped` passes for the wrong reason. Tracelet warns
+  when this applies.
+- **Windows.** The Collector is killed rather than shut down, so buffered telemetry is never flushed. Keep
+  `batch` timeouts and `decision_wait` well below the test timeout there.

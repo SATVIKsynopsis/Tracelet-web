@@ -1,0 +1,62 @@
+---
+title: Fixtures and assertions
+description: The two inputs of every test, and the rules that keep a passing test meaningful.
+icon: ListChecks
+---
+
+Every test pairs **one fixture** with **one or more assertions**.
+
+## Fixtures
+
+A fixture is a standard OTLP/JSON export request: exactly what an OTLP/HTTP client sends with
+`Content-Type: application/json` to `/v1/traces`, `/v1/logs` or `/v1/metrics`. There is no Tracelet-specific
+format and no conversion. The file is posted byte for byte and decoded by the Collector's own OTLP receiver.
+
+```json
+{ "resourceSpans": [ … ] }
+{ "resourceLogs": [ … ] }
+{ "resourceMetrics": [ … ] }
+```
+
+Before anything runs, Tracelet decodes each fixture to check it is a valid request with at least one item, and
+infers the signal from the top-level key. See [Fixture configuration](/docs/configuration/fixtures).
+
+## Items
+
+Assertions count and inspect **items**:
+
+| Signal | Item |
+| --- | --- |
+| traces | span |
+| logs | log record |
+| metrics | data point (one per histogram or summary point) |
+
+## Assertions
+
+| Kind | Example | Passes when |
+| --- | --- | --- |
+| Attribute | `attribute: password` with `absent: true` | the attribute check holds for every captured item |
+| Dropped | `dropped: true` | nothing reaches any exporter |
+| Exporter reached | `exporter: datadog` | at least one item reaches `datadog` |
+| Exporter count | `exporter: datadog` with `count: 1` | exactly that many items reach `datadog` |
+
+All assertions in a test must pass for the test to pass.
+
+## Rules that prevent false passes
+
+- **Attribute assertions fail when nothing was captured.** A redaction test can't pass because the telemetry
+  never arrived. If dropping is intended, write a separate test with `dropped: true`.
+- **`dropped` is strict.** It passes only if the fixture was accepted, the Collector stayed up and exited cleanly,
+  the capture server rejected nothing, and zero items reached any exporter over the whole window and shutdown.
+- **Negative assertions wait.** `dropped`, `count` and `absent` observe the full timeout, so "never arrives" is
+  observed rather than assumed.
+- **Startup and injection problems are errors, not results.** A Collector that doesn't start, or a fixture it
+  rejects, gives exit code 4 or 5. Neither is ever reported as a pass.
+- **A test needs at least one assertion.** An empty `expect` is rejected, because it would always pass.
+
+## One fixture per test
+
+Each test injects exactly one fixture into one fresh Collector. A fixture can hold many items: a whole trace,
+several log records, many data points. But a test can't send a sequence of requests over time. Stateful
+processors that need several points over time, such as `cumulative_to_delta` or rate-based sampling, can't be
+exercised meaningfully.

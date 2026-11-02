@@ -1,0 +1,88 @@
+---
+title: Span fixtures
+description: OTLP/JSON trace fixtures, from a single span to a whole trace for tail sampling.
+icon: GitBranch
+---
+
+A trace fixture has a top-level `resourceSpans` array. This is `fixtures/login-span.json` from the starter
+project:
+
+```json title="fixtures/login-span.json"
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          { "key": "service.name", "value": { "stringValue": "auth" } },
+          { "key": "deployment.environment.name", "value": { "stringValue": "test" } }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": { "name": "otel-test.fixtures", "version": "1.0.0" },
+          "spans": [
+            {
+              "traceId": "5b8efff798038103d269b633813fc60f",
+              "spanId": "eee19b7ec3c1b177",
+              "name": "POST /login",
+              "kind": 2,
+              "startTimeUnixNano": "1735689600000000000",
+              "endTimeUnixNano": "1735689600120000000",
+              "attributes": [
+                { "key": "http.request.method", "value": { "stringValue": "POST" } },
+                { "key": "http.route", "value": { "stringValue": "/login" } },
+                { "key": "user.name", "value": { "stringValue": "alice" } },
+                { "key": "password", "value": { "stringValue": "hunter2" } },
+                { "key": "http.response.status_code", "value": { "intValue": "200" } }
+              ],
+              "status": { "code": 1 }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+## Fields that matter
+
+| Field | Format |
+| --- | --- |
+| `traceId` | 32 hex characters, not base64 |
+| `spanId`, `parentSpanId` | 16 hex characters |
+| `startTimeUnixNano`, `endTimeUnixNano` | Nanoseconds since the epoch, **as a string** |
+| `kind` | Integer: `1` internal, `2` server, `3` client, `4` producer, `5` consumer |
+| `status.code` | Integer: `0` unset, `1` ok, `2` error |
+| attribute values | `stringValue`, `boolValue`, `intValue` (a string, `"500"`), `doubleValue` (a number) |
+
+The duration (`end - start`) is what latency-based sampling sees. In the example above it is 120 ms.
+
+## Whole traces
+
+Processors such as `tail_sampling` decide per trace. Give every span in the fixture the same `traceId` and link
+them with `parentSpanId`. In the [sampling example](/docs/examples/sampling-filtering), the error trace has three
+spans and only one has `status.code: 2`. The test asserts `count: 3`, which checks that the whole trace is kept,
+not just the failing span:
+
+```yaml
+- name: error traces are kept in full
+  input: fixtures/error-trace.json
+  expect:
+    - exporter: otlp_grpc/honeycomb
+      count: 3
+```
+
+## Resource and scope attributes
+
+Attributes can be set at three levels: `resource.attributes`, `scope.attributes` and the span's own
+`attributes`. Assertions look through all three by default and can be limited with `level:`. See
+[Attribute assertions](/docs/assertions/attributes#levels).
+
+The routing example puts `tenant.id` on the resource, because its routing connector uses `context: resource`.
+
+## What you can't assert
+
+The span's `name`, `kind`, `status` and timing are passed to the Collector and drive processors such as filters
+and sampling policies. But they can't be asserted directly: assertions cover attributes and delivery only. Test
+their effect instead. For example, an error span reaches the alerting exporter.

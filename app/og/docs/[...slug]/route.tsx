@@ -1,7 +1,7 @@
-import { source } from '@/lib/source';
-import { notFound } from 'next/navigation';
 import { generateOGImage } from 'fumadocs-ui/og';
+import { notFound } from 'next/navigation';
 import { appName, getPageImageUrl } from '@/lib/shared';
+import { source } from '@/lib/source';
 
 export const revalidate = false;
 
@@ -14,6 +14,8 @@ export async function GET(_req: Request, { params }: RouteContext<'/og/docs/[...
     title: page.data.title,
     description: page.data.description,
     site: appName,
+    primaryColor: 'rgba(245,158,59,0.35)',
+    primaryTextColor: 'rgb(245,158,59)',
   });
 }
 

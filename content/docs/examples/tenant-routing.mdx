@@ -1,0 +1,310 @@
+---
+title: Tenant routing
+description: Per-tenant backends with the routing connector, a default route, and an error fan-out to alerting.
+icon: Split
+---
+
+A shared gateway receives spans from many tenants. Each known tenant's spans must reach **only** that
+tenant's backend. Spans from unknown tenants, or with no tenant at all, go to a shared Kafka topic. Error spans
+from any tenant are also copied to the on-call alerting backend.
+
+**Components:** the `routing` connector (resource context, `default_pipelines`), the `forward` connector for
+fan-out, and `filter` on the alerting branch. Exporters: `otlp_http`, `otlp_grpc` with a `bearertokenauth`
+extension, and `kafka`.
+
+Source: [`examples/real-world/02-tenant-routing`](https://github.com/SATVIKsynopsis/Tracelet/tree/main/examples/real-world/02-tenant-routing)
+
+## Run it
+
+```bash
+git clone https://github.com/SATVIKsynopsis/Tracelet.git
+cd Tracelet
+otel-test test -f examples/real-world/02-tenant-routing/otel-test.yaml
+```
+
+The config references credentials and production endpoints exactly as a real config would. otel-test
+replaces the exporters, so the variables don't need to be set. All 5 tests pass against the
+unchanged config.
+
+## What is tested
+
+| Test | Protects against |
+| --- | --- |
+| acme spans reach only the acme backend | cross-tenant leaks, and normal traffic paging on-call |
+| globex spans reach only the globex backend | cross-tenant leaks |
+| unknown tenants go to the shared topic | data loss for new tenants |
+| spans without a tenant go to the shared topic | data loss when the attribute is missing |
+| errors reach the tenant backend and alerting | alerts silently lost |
+
+```yaml title="otel-test.yaml"
+collector: ./collector.yaml
+
+defaults:
+  timeout: 1500ms
+
+tests:
+  - name: acme spans reach only the acme backend
+    input: fixtures/acme-span.json
+    expect:
+      - exporter: otlp_http/acme
+        count: 1
+      - exporter: otlp_grpc/globex
+        count: 0
+      - exporter: kafka/shared
+        count: 0
+      - exporter: otlp_grpc/alerts
+        count: 0
+      - attribute: tenant.id
+        exporter: otlp_http/acme
+        equals: acme
+
+  - name: globex spans reach only the globex backend
+    input: fixtures/globex-span.json
+    expect:
+      - exporter: otlp_grpc/globex
+        count: 1
+      - exporter: otlp_http/acme
+        count: 0
+      - exporter: kafka/shared
+        count: 0
+
+  - name: unknown tenants go to the shared topic
+    input: fixtures/unknown-tenant-span.json
+    expect:
+      - exporter: kafka/shared
+        count: 1
+      - exporter: otlp_http/acme
+        count: 0
+      - exporter: otlp_grpc/globex
+        count: 0
+
+  - name: spans without a tenant go to the shared topic
+    input: fixtures/no-tenant-span.json
+    expect:
+      - exporter: kafka/shared
+        count: 1
+
+  - name: errors reach the tenant backend and alerting
+    input: fixtures/acme-error-span.json
+    expect:
+      - exporter: otlp_http/acme
+        count: 1
+      - exporter: otlp_grpc/alerts
+        count: 1
+      - exporter: otlp_grpc/globex
+        count: 0
+```
+
+The `count: 0` assertions wait for the full timeout, so "never reaches" is observed rather than
+assumed. Connectors aren't assertable themselves: every assertion names an exporter at the end of a pipeline.
+
+## The Collector config
+
+```yaml title="collector.yaml"
+# Multi-tenant gateway. Each tenant's spans must reach only that tenant's
+# backend; spans from unknown tenants go to a shared Kafka topic; error spans
+# from any tenant are additionally copied to the on-call alerting backend.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 200ms
+  # The alerting branch only wants errors.
+  filter/errors_only:
+    error_mode: ignore
+    traces:
+      span:
+        - status.code != STATUS_CODE_ERROR
+
+connectors:
+  forward/fanout: {}
+  routing/tenant:
+    default_pipelines: [traces/shared]
+    error_mode: ignore
+    table:
+      - context: resource
+        condition: attributes["tenant.id"] == "acme"
+        pipelines: [traces/acme]
+      - context: resource
+        condition: attributes["tenant.id"] == "globex"
+        pipelines: [traces/globex]
+
+exporters:
+  otlp_http/acme:
+    endpoint: https://acme.ingest.example.com
+    headers:
+      authorization: Bearer ${env:ACME_TOKEN}
+  otlp_grpc/globex:
+    endpoint: globex.ingest.example.com:4317
+    auth:
+      authenticator: bearertokenauth/globex
+  kafka/shared:
+    brokers: [kafka-1.internal:9092, kafka-2.internal:9092]
+    traces:
+      topic: otlp_spans_shared
+  otlp_grpc/alerts:
+    endpoint: alerts.internal:4317
+    tls:
+      insecure: true
+
+extensions:
+  bearertokenauth/globex:
+    token: ${env:GLOBEX_TOKEN}
+
+service:
+  extensions: [bearertokenauth/globex]
+  pipelines:
+    traces/in:
+      receivers: [otlp]
+      exporters: [routing/tenant, forward/fanout]
+    traces/acme:
+      receivers: [routing/tenant]
+      processors: [batch]
+      exporters: [otlp_http/acme]
+    traces/globex:
+      receivers: [routing/tenant]
+      processors: [batch]
+      exporters: [otlp_grpc/globex]
+    traces/shared:
+      receivers: [routing/tenant]
+      processors: [batch]
+      exporters: [kafka/shared]
+    traces/alerts:
+      receivers: [forward/fanout]
+      processors: [filter/errors_only]
+      exporters: [otlp_grpc/alerts]
+```
+
+## A fixture
+
+```json title="fixtures/acme-span.json"
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "storefront"
+            }
+          },
+          {
+            "key": "tenant.id",
+            "value": {
+              "stringValue": "acme"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "storefront.http",
+            "version": "1.4.0"
+          },
+          "spans": [
+            {
+              "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "spanId": "00f067aa0ba902b7",
+              "name": "GET /cart",
+              "kind": 2,
+              "startTimeUnixNano": "1735689600000000000",
+              "endTimeUnixNano": "1735689600080000000",
+              "attributes": [
+                {
+                  "key": "http.request.method",
+                  "value": {
+                    "stringValue": "GET"
+                  }
+                },
+                {
+                  "key": "http.route",
+                  "value": {
+                    "stringValue": "/cart"
+                  }
+                },
+                {
+                  "key": "http.response.status_code",
+                  "value": {
+                    "intValue": "200"
+                  }
+                }
+              ],
+              "status": {
+                "code": 1
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+## Regressions it catches
+
+Each `regressions/<name>.patch` is a realistic edit to `collector.yaml`. Each `.expect` file lists the
+assertions, as `test name :: assertion`, that must fail when the patch is applied.
+
+| Patch | Change | Fails |
+| --- | --- | --- |
+| `globex-routed-to-acme` | copy-paste error in the routing table | globex spans reach only the globex backend: `exporter otlp_grpc/globex receives 1 item(s)`<br />globex spans reach only the globex backend: `exporter otlp_http/acme receives 0 item(s)` |
+| `no-default-route` | `default_pipelines` removed | unknown tenants go to the shared topic: `exporter kafka/shared receives 1 item(s)`<br />spans without a tenant go to the shared topic: `exporter kafka/shared receives 1 item(s)` |
+| `alert-filter-inverted` | `!=` changed to `==` in the alerting filter | acme spans reach only the acme backend: `exporter otlp_grpc/alerts receives 0 item(s)`<br />errors reach the tenant backend and alerting: `exporter otlp_grpc/alerts receives 1 item(s)` |
+
+### Example: `globex-routed-to-acme`
+
+```diff title="regressions/globex-routed-to-acme.patch"
+--- a/collector.yaml
++++ b/collector.yaml
+@@ -30,7 +30,7 @@
+         pipelines: [traces/acme]
+       - context: resource
+         condition: attributes["tenant.id"] == "globex"
+-        pipelines: [traces/globex]
++        pipelines: [traces/acme]
+ 
+ exporters:
+   otlp_http/acme:
+```
+
+Output with the patch applied (real output, filtered to the affected test):
+
+```text
+otel-test v0.1.0
+
+Collector: v0.164.0
+Config:    collector.yaml
+Tests:     1
+
+✗ globex spans reach only the globex backend
+
+    ✗ exporter otlp_grpc/globex receives 1 item(s)
+      Expected: 1 span
+      Actual:   0 spans
+      Exporter: otlp_grpc/globex
+      Received: otlp_http/acme: 1 span
+    ✗ exporter otlp_http/acme receives 0 item(s)
+      Expected: 0 spans
+      Actual:   1 span
+      Exporter: otlp_http/acme
+      Received: otlp_http/acme: 1 span
+
+0 passed, 1 failed
+
+Time: 1.93s
+error: 1 test(s) failed
+```
+
+## Not covered
+
+- The Kafka exporter's topic and encoding, and the gRPC exporter's auth, are replaced by otel-test. What is tested is *which exporter* receives the data.
+- Routing on request metadata (`context: request`, for example an HTTP header) is **not testable**: fixtures are injected without custom headers.

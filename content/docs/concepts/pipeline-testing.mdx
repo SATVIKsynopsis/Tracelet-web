@@ -1,0 +1,84 @@
+---
+title: Collector pipeline testing
+description: Which parts of a Collector config Tracelet exercises, and how routing through connectors is preserved.
+icon: Workflow
+---
+
+A Collector config is a graph: receivers feed pipelines, pipelines run processors in order, and pipelines end
+in exporters or in connectors that feed other pipelines. Tracelet replaces the two ends of that graph and runs
+everything in between.
+
+```text
+              replaced                 runs unchanged                    replaced
+  fixture ──▶ receiver ──▶ processors ──▶ connectors ──▶ processors ──▶ exporter ──▶ capture
+```
+
+## What runs
+
+- **Processors**, with your settings and in your pipeline order: `attributes`, `filter`, `transform` (OTTL),
+  `redaction`, `tail_sampling`, `batch`, `resource`, `metrics_transform` and any other processor in the
+  Collector build.
+- **Connectors**, such as `routing`, `forward`, `span_metrics` and `service_graph`. A connector in a
+  pipeline's `exporters` stays there, so telemetry flows into the pipelines it feeds.
+- **Extensions that processors depend on**, such as a storage extension.
+
+## What doesn't run
+
+- **Receivers.** Each is replaced by a local OTLP/HTTP receiver. Receiver-side parsing, such as `filelog`
+  operators, Prometheus scraping and relabeling, or `hostmetrics` collection, never runs.
+- **Exporters.** Each is replaced by a capture exporter. Translation (for example Datadog or Prometheus remote
+  write), headers, auth, TLS, queues and retries are not exercised, and no backend is contacted.
+
+So a test asserts what each exporter **would have been handed**, not what a backend would store.
+
+## Routing is preserved
+
+There is one replacement receiver per original receiver. If `otlp` feeds `traces/in` and `filelog/app` feeds
+`logs/files`, injecting through `filelog/app` enters `logs/files` only.
+
+Connectors keep their place in the graph. In the [tenant routing example](/docs/examples/tenant-routing), a span
+enters `traces/in`, the `routing/tenant` connector sends it to `traces/acme`, and the test asserts on the
+exporter at the end of that pipeline:
+
+```yaml
+- name: acme spans reach only the acme backend
+  input: fixtures/acme-span.json
+  expect:
+    - exporter: otlp_http/acme
+      count: 1
+    - exporter: otlp_grpc/globex
+      count: 0
+```
+
+Assertions name exporters, not connectors. Asserting on `routing/tenant` is rejected with:
+
+```text
+"routing/tenant" is a connector, not an exporter; assert on the exporters of the pipelines it feeds
+```
+
+## Time-based processors
+
+Because each test shuts its Collector down gracefully, buffered telemetry is still captured:
+
+| Processor or connector | At graceful shutdown |
+| --- | --- |
+| `batch` | flushed, captured |
+| `tail_sampling` | pending traces decided, captured |
+| `interval` | flushed, captured |
+| `groupbytrace` | **discarded** |
+| `span_metrics`, `service_graph` | **nothing emitted**. They only emit on their flush timer. |
+
+Tracelet warns at plan time when a `groupbytrace` processor's `wait_duration` (default 1 s) isn't shorter than
+the test's timeout, and when `span_metrics` or `service_graph` have a `metrics_flush_interval` that is unset or
+not shorter than the timeout. In those cases, set the interval below the timeout. Avoid `count` on their output,
+which repeats on every flush.
+
+These shutdown behaviors were verified against otelcol-contrib v0.164.0. On Windows the Collector is killed
+instead of shut down, so nothing is flushed.
+
+## Components that need infrastructure
+
+- `k8s_attributes` without `passthrough: true` never becomes ready outside a Kubernetes cluster. Tracelet
+  reports a startup error with a hint to set `passthrough: true`.
+- `resource_detection` with cloud detectors (for example `ec2`) starts, but adds its detector timeout to
+  every test's startup.

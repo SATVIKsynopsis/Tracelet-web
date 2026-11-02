@@ -1,6 +1,6 @@
 {
   "name": "tracelet-web",
-  "version": "0.0.53",
+  "version": "0.1.0",
   "private": true,
   "scripts": {
     "build": "next build",
@@ -25,10 +25,12 @@
     "@types/node": "^26.6.5",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
+    "eslint": "^9.39.4",
+    "eslint-config-next": "16.4.2",
     "postcss": "^8.5.31",
     "tailwindcss": "^4.3.3",
-    "typescript": "^7.0.2",
-    "eslint": "^9.39.4",
-    "eslint-config-next": "16.4.2"
-  }
+    "typescript": "~6.0.3"
+  },
+  "description": "Website and documentation for Tracelet (otel-test)",
+  "license": "Apache-2.0"
 }

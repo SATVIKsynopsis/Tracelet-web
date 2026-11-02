@@ -1,0 +1,67 @@
+---
+title: Known limitations
+description: Everything Tracelet v0.1.0 does not test or support, in one place.
+icon: CircleAlert
+---
+
+Tracelet tests what happens between receivers and exporters. It is **not** an end-to-end test of your observability
+backends. This page lists what that leaves out.
+
+## Not tested
+
+- **Receivers.** They are replaced. Receiver-specific ingestion behavior doesn't run: `filelog` operators,
+  Prometheus scraping and relabeling, `hostmetrics` collection, receiver-side auth and TLS.
+- **Exporters and backends.** They are replaced. Exporter translation (Datadog, Prometheus remote write, Kafka
+  encoding), headers, authentication, TLS, retries and queues don't run, and no backend is contacted.
+- **Extensions used by receivers or exporters**, such as auth extensions and exporter queue storage, are removed.
+
+## Assertions
+
+- Only **attributes** and **delivery** (which exporter, how many items) can be asserted.
+- Span names, kind and status; log bodies and severity; and metric names, values and types **can't** be asserted.
+- `equals` must hold for every item. There is no "one of" check and no type-only check.
+- `matches` works on strings only. Only scalar values can be compared.
+
+See [Assertion limitations](/docs/assertions/limitations) for workarounds.
+
+## Inputs
+
+- **Fixtures are injected over OTLP/HTTP only**, one fixture per test, through the receiver you choose.
+- Fixtures are injected **without custom headers**, so routing on request metadata (`context: request`, client
+  headers) can't be tested.
+- **Stateful processors** that need several requests over time (`cumulative_to_delta`, rate limiting, the rate
+  behind probabilistic sampling) can't be exercised meaningfully. A single fixture can still hold many items.
+
+## Configuration
+
+- `profiles` pipelines are rejected.
+- Provider references in place of whole sections or lists (`exporters: ${file:x.yaml}`) are rejected.
+- `${env:…}` references inside processors are resolved from the environment Tracelet runs in, so missing
+  variables behave as they would in production.
+
+## Timing
+
+- `groupbytrace` discards pending traces at shutdown. Tracelet warns when its `wait_duration` isn't shorter than
+  the test timeout.
+- `span_metrics` and `service_graph` emit only on their flush timer. Set `metrics_flush_interval` below the test
+  timeout, and avoid `count` on their output, which repeats.
+- Suites run sequentially, about 200 ms per test for the Collector restart plus the observation window.
+- Tests with `dropped`, `count` or `absent` always use their full timeout.
+
+## Infrastructure-dependent processors
+
+- `k8s_attributes` doesn't start outside a Kubernetes cluster unless `passthrough: true` is set.
+- Cloud `resource_detection` detectors add their timeout to every test.
+
+## Platforms
+
+- **Windows support is early.** Windows has no graceful stop signal, so the Collector is killed rather than shut
+  down, and buffered telemetry is not flushed. A `dropped` assertion can pass because data was still buffered.
+- The shell installer supports macOS and Linux only. On Windows, download the `.zip`.
+- Linux release builds target glibc (`unknown-linux-gnu`).
+
+## Collector version
+
+- Pinned to **otelcol-contrib v0.164.0**. Other builds work through `--collector-bin` if they include the `otlp`
+  receiver and the `otlp_http` (or older `otlphttp`) exporter.
+- Docker-based execution is not implemented.

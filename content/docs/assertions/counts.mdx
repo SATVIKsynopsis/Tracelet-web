@@ -1,0 +1,67 @@
+---
+title: Item count assertions
+description: Assert that an exporter is reached, receives exactly N items, or never receives anything.
+icon: Hash
+---
+
+Exporter assertions check delivery. They name an exporter ID from your config:
+
+```yaml
+expect:
+  - exporter: otlp_http/acme        # at least one item
+  - exporter: otlp_http/acme        # exactly one item
+    count: 1
+  - exporter: otlp_grpc/globex      # never reaches it
+    count: 0
+```
+
+| Assertion | Passes when |
+| --- | --- |
+| `exporter: E` | at least one item reaches `E` |
+| `exporter: E` with `count: N` | exactly `N` items reach `E` over the whole window and shutdown |
+| `exporter: E` with `count: 0` | `E` receives nothing |
+
+Items are spans, log records or metric data points. With `count`, items of every signal that `E` received
+are summed. Empty export requests, such as an idle pipeline's flush at shutdown, are ignored.
+
+## Exact counts
+
+`count` is exact, which makes it useful beyond routing:
+
+- **Whole traces.** A three-span error trace kept by `tail_sampling` must give `count: 3`, not 1.
+- **Aggregation.** Four data points summed into three series must give `count: 3`.
+- **Fan-out.** The same record reaching two exporters gives `count: 1` at each.
+
+A failure shows what each exporter received:
+
+```text
+✗ exporter otlp_http/backend receives 2 item(s)
+  Expected: 2 spans
+  Actual:   1 span
+  Exporter: otlp_http/backend
+  Received: otlp_http/backend: 1 span
+```
+
+The wording follows the signal the exporter actually received. A trace fixture that feeds a `span_metrics`
+connector is reported in data points at the metrics exporter.
+
+## "Never reaches"
+
+`count: 0` is the way to assert that one exporter received nothing while others may have. Because `count` waits
+for the full timeout, "never" is observed rather than assumed. To assert that **no** exporter received anything,
+use [`dropped: true`](/docs/assertions/dropped).
+
+## Timing
+
+A test containing any `count` assertion observes the full timeout. A test whose only delivery assertion is
+`exporter: E`, without `count`, can finish early once it holds and output has settled for 500 ms.
+
+Connectors that emit on a timer, such as `span_metrics` and `service_graph`, emit again on every flush interval.
+Avoid `count` on their output, because the number depends on timing. Assert presence and attributes instead.
+
+## Rules
+
+- `count` needs `exporter:` in the same assertion.
+- `count` can't be combined with `attribute:` or `dropped:`. Write separate assertions.
+- The exporter must be used by a pipeline. A connector ID is rejected: assert on the exporters of the pipelines
+  it feeds.
